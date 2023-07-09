@@ -1,0 +1,16 @@
+[package]
+name = "netadmin_minion"
+version = "0.1.0"
+edition = "2021"
+authors = ["Georgiy Korneev <kgeorgiy@kgeorgiy.info>"]
+description = "NetAdmin minion"
+license = "AGPL-3.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.71"
+chrono = { version = "0.4.26", features = ["serde"] }
+serde = { version = "1.0.169", features = ["derive"] }
+serde_json = "1.0.100"
+tokio = { version = "1.29.1", features = ["net", "macros", "rt-multi-thread", "time"] }

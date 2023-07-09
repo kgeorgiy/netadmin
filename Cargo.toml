@@ -1,0 +1,6 @@
+[workspace]
+
+members = [
+    "netadmin_minion",
+    "netadmin_server",
+]
