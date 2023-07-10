@@ -1,4 +1,5 @@
 use core::fmt::Debug;
+use core::time::Duration;
 use std::env;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::task::JoinHandle;
+use tokio::time::sleep;
 use tokio_rustls::rustls::server::{AllowAnyAuthenticatedClient, NoClientAuth};
 use tokio_rustls::rustls::{Certificate, PrivateKey, RootCertStore, ServerConfig};
 use tokio_rustls::TlsAcceptor;
@@ -142,12 +144,18 @@ impl Minion {
         let mut buffer = [0; Self::MAX_REQUEST_SIZE];
         let len = stream.read(&mut buffer).await?;
         #[allow(clippy::indexing_slicing)]
-        if let Ok(request) = MinionRequest::from_bytes(&buffer[0..len]) {
-            let response = self.response(&request);
-            Ok(stream.write_all(&response.to_json().into_bytes()).await?)
-        } else {
-            // Invalid request
-            Ok(())
+        match MinionRequest::from_bytes(&buffer[0..len]) {
+            Ok(request) => {
+                let response = self.response(&request);
+                stream.write_all(&response.to_json().into_bytes()).await?;
+                AsyncWriteExt::shutdown(&mut stream).await?;
+
+                // Java TLS compatibility
+                sleep(Duration::from_millis(1)).await;
+
+                Ok(())
+            }
+            Err(error) => Err(error),
         }
     }
 }
