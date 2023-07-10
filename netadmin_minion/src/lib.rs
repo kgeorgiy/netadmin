@@ -61,11 +61,13 @@ impl Minion {
     ///
     /// # Errors
     /// Returns error if cannot bind to specified [`socket_address`]
-    pub async fn serve_udp(self: &Arc<Self>, socket_address: &SocketAddr) -> Result<JoinHandle<()>> {
+    pub async fn serve_udp(
+        self: &Arc<Self>,
+        socket_address: &SocketAddr,
+    ) -> Result<JoinHandle<()>> {
         let socket = Arc::new(UdpSocket::bind(socket_address).await?);
         let this = Arc::clone(self);
         Ok(tokio::spawn(async move {
-
             let mut buffer = [0; Self::MAX_REQUEST_SIZE];
             while let Ok((len, addr)) = socket.recv_from(&mut buffer).await {
                 let socket = Arc::clone(&socket);
@@ -88,7 +90,10 @@ impl Minion {
     ///
     /// # Errors
     /// Returns error if cannot bind to specified [`socket_address`]
-    pub async fn serve_tcp(self: &Arc<Self>, socket_address: &SocketAddr) -> Result<JoinHandle<()>> {
+    pub async fn serve_tcp(
+        self: &Arc<Self>,
+        socket_address: &SocketAddr,
+    ) -> Result<JoinHandle<()>> {
         let listener = Arc::new(TcpListener::bind(socket_address).await?);
         let this = Arc::clone(self);
         Ok(tokio::spawn(async move {
@@ -136,7 +141,10 @@ pub trait Jsonable: Sized {
     fn from_bytes(json: &[u8]) -> Result<Self>;
 }
 
-impl<T> Jsonable for T where T: Serialize + for<'a> Deserialize<'a> {
+impl<T> Jsonable for T
+where
+    T: Serialize + for<'a> Deserialize<'a>,
+{
     fn to_json(&self) -> String {
         serde_json::to_string(self).expect("never happens")
     }
@@ -205,9 +213,7 @@ mod tests {
         let local = local.to_owned();
         let server_address = SocketAddr::new(IpAddr::from_str(host).unwrap(), 16236);
         parallel_requests(
-            move |minion| async move {
-                minion.serve_udp(&server_address).await
-            },
+            move |minion| async move { minion.serve_udp(&server_address).await },
             move |id, bytes| {
                 let local = local.clone();
                 async move {
@@ -220,8 +226,9 @@ mod tests {
                     assert_eq!(server_address, addr);
                     Ok((buffer, len))
                 }
-            }
-        ).await
+            },
+        )
+        .await
     }
 
     #[tokio::test]
@@ -237,9 +244,7 @@ mod tests {
     async fn test_tcp(host: &str) -> Result<()> {
         let server_address = SocketAddr::new(IpAddr::from_str(host)?, 16236);
         parallel_requests(
-            move |minion| async move {
-                minion.serve_tcp(&server_address).await
-            },
+            move |minion| async move { minion.serve_tcp(&server_address).await },
             move |id, bytes| async move {
                 let mut stream = TcpStream::connect(server_address).await?;
                 stream.write_all(&bytes).await?;
@@ -249,16 +254,17 @@ mod tests {
                 let mut buffer = [0; 1024];
                 let len = stream.read(&mut buffer).await?;
                 Ok((buffer, len))
-            }
-        ).await
+            },
+        )
+        .await
     }
 
     async fn parallel_requests<S, SR, C, CR>(start: S, communicate: C) -> Result<()>
-        where
-            S: Fn(Arc<Minion>) -> SR,
-            SR: Future<Output=Result<JoinHandle<()>>> + Send + 'static,
-            C: Fn(String, Vec<u8>) -> CR + Clone + 'static,
-            CR: Future<Output=Result<([u8; 1024], usize)>>,
+    where
+        S: Fn(Arc<Minion>) -> SR,
+        SR: Future<Output = Result<JoinHandle<()>>> + Send + 'static,
+        C: Fn(String, Vec<u8>) -> CR + Clone + 'static,
+        CR: Future<Output = Result<([u8; 1024], usize)>>,
     {
         let minion_id = "test_minion".to_owned();
         tokio::spawn(start(Minion::new(minion_id.clone())));
@@ -277,28 +283,29 @@ mod tests {
                 println!("Request {id} OK");
                 Ok(())
             }
-        }).await?;
+        })
+        .await?;
         Ok(())
     }
 
     type PBFR<T> = Pin<Box<dyn Future<Output = Result<T>>>>;
 
     fn parallel<T, F, FR>(n: usize, f: F) -> PBFR<Vec<T>>
-        where
-            T: 'static,
-            F: FnMut(usize) -> FR,
-            FR: Future<Output = Result<T>> + 'static,
+    where
+        T: 'static,
+        F: FnMut(usize) -> FR,
+        FR: Future<Output = Result<T>> + 'static,
     {
-        (0..n)
-            .map(f)
-            .fold(
-                Box::pin(async { Ok(vec![]) as Result<Vec<T>>}),
-                |prev, next| Box::pin(async {
+        (0..n).map(f).fold(
+            Box::pin(async { Ok(vec![]) as Result<Vec<T>> }),
+            |prev, next| {
+                Box::pin(async {
                     tokio::try_join!(prev, next).map(|(mut p, n)| {
                         p.push(n);
                         p
                     })
-                }),
-            )
+                })
+            },
+        )
     }
 }

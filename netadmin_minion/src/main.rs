@@ -9,6 +9,8 @@ use netadmin_minion::Minion;
 #[allow(clippy::unwrap_used)]
 async fn main() -> Result<()> {
     let minion = Minion::new("test_minion".to_owned());
-    let handle = Box::pin(minion.serve_udp(&SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 6236))).await?;
+    let handle =
+        Box::pin(minion.serve_udp(&SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 6236)))
+            .await?;
     Ok(handle.await?)
 }
