@@ -1,8 +1,7 @@
-#![allow(clippy::print_stdout)]
-
 use core::fmt::Debug;
 use std::env;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::str;
 use std::sync::Arc;
 
@@ -12,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::task::JoinHandle;
+use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig};
+use tokio_rustls::TlsAcceptor;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[must_use]
@@ -40,6 +41,8 @@ pub struct Minion {
 }
 
 impl Minion {
+    pub const TLS_DOMAIN: &'static str = "netadmin_minion";
+
     const MAX_REQUEST_SIZE: usize = 0x100;
 
     #[must_use]
@@ -116,6 +119,70 @@ impl Minion {
             }
         }))
     }
+
+    /// Serves full minion
+    ///
+    /// # Errors
+    /// Returns error if cannot bind to specified [`socket_address`]
+    pub async fn serve_tls(
+        self: &Arc<Self>,
+        socket_address: &SocketAddr,
+        certificates_file: &Path,
+        keys_file: &Path,
+    ) -> Result<JoinHandle<()>> {
+        let certificates = Self::load_certificates(certificates_file)?;
+        let keys = Self::load_keys(keys_file)?;
+        let key = keys.into_iter().next().context("Private key")?;
+        let config = ServerConfig::builder()
+            .with_safe_defaults()
+            .with_no_client_auth()
+            .with_single_cert(certificates, key)
+            .context("Invalid private key")?;
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = TcpListener::bind(&socket_address).await?;
+
+        let this = Arc::clone(self);
+        Ok(tokio::spawn(async move {
+            loop {
+                if let Ok((stream, _)) = listener.accept().await {
+                    let acceptor = acceptor.clone();
+                    let this = Arc::clone(&this);
+                    tokio::spawn(async move {
+                        let mut stream = acceptor.accept(stream).await?;
+                        // stream.write_all("Hello".as_bytes()).await
+                        let mut buffer = [0; Self::MAX_REQUEST_SIZE];
+                        let len = stream.read(&mut buffer).await?;
+                        #[allow(clippy::indexing_slicing)]
+                        if let Ok(request) = MinionRequest::from_bytes(&buffer[0..len]) {
+                            let response = this.response(&request);
+                            stream.write_all(&response.to_json().into_bytes()).await
+                        } else {
+                            // Invalid request
+                            Ok(())
+                        }
+                    });
+                }
+            }
+        }))
+    }
+
+    fn load_certificates(path: &Path) -> Result<Vec<Certificate>> {
+        rustls_pemfile::certs(&mut Self::open(path).context("Certificates error")?)
+            .context("Invalid certificates")
+            .map(|certs| certs.into_iter().map(Certificate).collect())
+    }
+
+    fn load_keys(path: &Path) -> Result<Vec<PrivateKey>> {
+        let rd = &mut Self::open(path)?;
+        rustls_pemfile::pkcs8_private_keys(rd)
+            .context("Invalid private keys")
+            .map(|keys| keys.into_iter().map(PrivateKey).collect())
+    }
+
+    fn open(path: &Path) -> Result<std::io::BufReader<std::fs::File>> {
+        let file = std::fs::File::open(path).context(format!("File {path:?} not found"))?;
+        Ok(std::io::BufReader::new(file))
+    }
 }
 
 pub trait Jsonable: Sized {
@@ -159,16 +226,26 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::print_stdout)]
 mod tests {
     use std::future::Future;
     use std::net::{IpAddr, SocketAddr};
     use std::pin::Pin;
     use std::str;
     use std::str::FromStr;
+    use std::sync::atomic::{AtomicU16, Ordering};
 
     use tokio::net::{TcpStream, UdpSocket};
+    use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerName};
+    use tokio_rustls::TlsConnector;
 
     use super::*;
+
+    static PORT: AtomicU16 = AtomicU16::new(16236);
+
+    fn port() -> u16 {
+        PORT.fetch_add(1, Ordering::Relaxed)
+    }
 
     #[test]
     fn local_minion() {
@@ -211,7 +288,7 @@ mod tests {
 
     async fn test_udp(host: &str, local: &str) -> Result<()> {
         let local = local.to_owned();
-        let server_address = SocketAddr::new(IpAddr::from_str(host).unwrap(), 16236);
+        let server_address = SocketAddr::new(IpAddr::from_str(host).unwrap(), port());
         parallel_requests(
             move |minion| async move { minion.serve_udp(&server_address).await },
             move |id, bytes| {
@@ -242,7 +319,7 @@ mod tests {
     }
 
     async fn test_tcp(host: &str) -> Result<()> {
-        let server_address = SocketAddr::new(IpAddr::from_str(host)?, 16236);
+        let server_address = SocketAddr::new(IpAddr::from_str(host)?, port());
         parallel_requests(
             move |minion| async move { minion.serve_tcp(&server_address).await },
             move |id, bytes| async move {
@@ -267,7 +344,7 @@ mod tests {
         CR: Future<Output = Result<([u8; 1024], usize)>>,
     {
         let minion_id = "test_minion".to_owned();
-        tokio::spawn(start(Minion::new(minion_id.clone())));
+        start(Minion::new(minion_id.clone())).await?;
         parallel(5, |i| {
             let communicate = communicate.clone();
             let minion_id = minion_id.clone();
@@ -307,5 +384,50 @@ mod tests {
                 })
             },
         )
+    }
+
+    #[tokio::test]
+    async fn test_tls() -> Result<()> {
+        let host = "127.0.0.2";
+        let server_address = SocketAddr::new(IpAddr::from_str(host)?, port());
+
+        let mut root_cert_store = RootCertStore::empty();
+        for certificate in Minion::load_certificates(Path::new("__keys/netadmin_minion.crt"))? {
+            root_cert_store.add(&certificate)?;
+        }
+        let config = Arc::new(
+            ClientConfig::builder()
+                .with_safe_defaults()
+                .with_root_certificates(root_cert_store)
+                .with_no_client_auth(),
+        );
+
+        parallel_requests(
+            move |minion| async move {
+                minion
+                    .serve_tls(
+                        &server_address,
+                        Path::new("__keys/netadmin_minion.crt"),
+                        Path::new("__keys/netadmin_minion.key"),
+                    )
+                    .await
+            },
+            move |id, bytes| {
+                let config = Arc::clone(&config);
+                async move {
+                    let connector = TlsConnector::from(config);
+                    let domain = ServerName::try_from(Minion::TLS_DOMAIN)?;
+                    let stream = TcpStream::connect(server_address).await?;
+                    let mut stream = connector.connect(domain, stream).await?;
+                    stream.write_all(&bytes).await?;
+                    println!("TLS request {id} sent to {server_address}");
+
+                    let mut buffer = [0; 1024];
+                    let len = stream.read(&mut buffer).await?;
+                    Ok((buffer, len))
+                }
+            },
+        )
+        .await
     }
 }
