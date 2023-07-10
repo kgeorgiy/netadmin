@@ -155,6 +155,7 @@ mod tests {
     use std::future::Future;
     use std::net::{IpAddr, SocketAddr};
     use std::pin::Pin;
+    use std::str;
     use std::str::FromStr;
 
     use tokio::net::{TcpStream, UdpSocket};
@@ -191,28 +192,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_udp() -> Result<()> {
-        let server_address = SocketAddr::new(IpAddr::from_str("127.0.0.2").unwrap(), 16236);
+    async fn test_udp_ipv4() -> Result<()> {
+        test_udp("127.0.0.2", "0.0.0.0").await
+    }
+
+    #[tokio::test]
+    async fn test_udp_ipv6() -> Result<()> {
+        test_udp("::1", "::").await
+    }
+
+    async fn test_udp(host: &str, local: &str) -> Result<()> {
+        let local = local.to_owned();
+        let server_address = SocketAddr::new(IpAddr::from_str(host).unwrap(), 16236);
         parallel_requests(
             move |minion| async move {
                 minion.serve_udp(&server_address).await
             },
-            move |id, bytes| async move {
-                let socket = UdpSocket::bind("0.0.0.0:0").await?;
-                socket.send_to(&bytes, &server_address).await?;
-                println!("UDP request {id} sent to {server_address}");
+            move |id, bytes| {
+                let local = local.clone();
+                async move {
+                    let socket = UdpSocket::bind(format!("{local}:0")).await?;
+                    socket.send_to(&bytes, &server_address).await?;
+                    println!("UDP request {id} sent to {server_address}");
 
-                let mut buffer = [0; 1024];
-                let (len, addr) = socket.recv_from(&mut buffer).await?;
-                assert_eq!(server_address, addr);
-                Ok((buffer, len))
+                    let mut buffer = [0; 1024];
+                    let (len, addr) = socket.recv_from(&mut buffer).await?;
+                    assert_eq!(server_address, addr);
+                    Ok((buffer, len))
+                }
             }
         ).await
     }
 
     #[tokio::test]
-    async fn test_tcp() -> Result<()> {
-        let server_address = SocketAddr::new(IpAddr::from_str("127.0.0.2").unwrap(), 16236);
+    async fn test_tcp_ipv4() -> Result<()> {
+        test_tcp("127.0.0.2").await
+    }
+
+    #[tokio::test]
+    async fn test_tcp_ipv6() -> Result<()> {
+        test_tcp("::1").await
+    }
+
+    async fn test_tcp(host: &str) -> Result<()> {
+        let server_address = SocketAddr::new(IpAddr::from_str(host)?, 16236);
         parallel_requests(
             move |minion| async move {
                 minion.serve_tcp(&server_address).await
@@ -232,14 +255,15 @@ mod tests {
 
     async fn parallel_requests<S, SR, C, CR>(start: S, communicate: C) -> Result<()>
         where
-            S: Fn(Arc<Minion>) -> SR + Copy + 'static,
+            S: Fn(Arc<Minion>) -> SR,
             SR: Future<Output=Result<JoinHandle<()>>> + Send + 'static,
-            C: Fn(String, Vec<u8>) -> CR + Copy + 'static,
+            C: Fn(String, Vec<u8>) -> CR + Clone + 'static,
             CR: Future<Output=Result<([u8; 1024], usize)>>,
     {
         let minion_id = "test_minion".to_owned();
         tokio::spawn(start(Minion::new(minion_id.clone())));
         parallel(5, |i| {
+            let communicate = communicate.clone();
             let minion_id = minion_id.clone();
             async move {
                 let id = format!("12345_{i}");
