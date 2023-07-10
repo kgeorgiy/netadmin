@@ -9,7 +9,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::net::UdpSocket;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, UdpSocket};
+use tokio::task::JoinHandle;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[must_use]
@@ -27,8 +29,8 @@ pub struct MinionRequest {
 }
 
 impl MinionRequest {
-    pub fn new(id: &str) -> MinionRequest {
-        MinionRequest { request_id: id.to_owned() }
+    pub fn new(id: String) -> MinionRequest {
+        MinionRequest { request_id: id }
     }
 }
 
@@ -38,9 +40,11 @@ pub struct Minion {
 }
 
 impl Minion {
+    const MAX_REQUEST_SIZE: usize = 0x100;
+
     #[must_use]
-    pub fn new(id: &str) -> Arc<Minion> {
-        Arc::new(Minion { id: id.to_owned() })
+    pub fn new(id: String) -> Arc<Minion> {
+        Arc::new(Minion { id })
     }
 
     fn response(&self, request: &MinionRequest) -> MinionResponse {
@@ -57,26 +61,55 @@ impl Minion {
     ///
     /// # Errors
     /// Returns error if cannot bind to specified [`socket_address`]
-    pub async fn serve(self: &Arc<Self>, socket_address: &SocketAddr) -> Result<()> {
-        const MAX_PACKET_SIZE: usize = 0x1_0000;
-
-        let mut buffer = [0; MAX_PACKET_SIZE];
+    pub async fn serve_udp(self: &Arc<Self>, socket_address: &SocketAddr) -> Result<JoinHandle<()>> {
         let socket = Arc::new(UdpSocket::bind(socket_address).await?);
-        loop {
-            let (len, addr) = socket.recv_from(&mut buffer).await?;
-            let socket = Arc::clone(&socket);
-            let this = Arc::clone(self);
-            tokio::spawn(async move {
-                #[allow(clippy::indexing_slicing)]
-                if let Ok(request) = MinionRequest::from_bytes(&buffer[0..len]) {
-                    let response = this.response(&request);
-                    socket.send_to(&response.to_json().into_bytes(), addr).await
-                } else {
-                    // Invalid request
-                    Ok(0)
-                }
-            });
-        }
+        let this = Arc::clone(self);
+        Ok(tokio::spawn(async move {
+
+            let mut buffer = [0; Self::MAX_REQUEST_SIZE];
+            while let Ok((len, addr)) = socket.recv_from(&mut buffer).await {
+                let socket = Arc::clone(&socket);
+                let this = Arc::clone(&this);
+                tokio::spawn(async move {
+                    #[allow(clippy::indexing_slicing)]
+                    if let Ok(request) = MinionRequest::from_bytes(&buffer[0..len]) {
+                        let response = this.response(&request);
+                        socket.send_to(&response.to_json().into_bytes(), addr).await
+                    } else {
+                        // Invalid request
+                        Ok(0)
+                    }
+                });
+            }
+        }))
+    }
+
+    /// Serves minion information on TCP port
+    ///
+    /// # Errors
+    /// Returns error if cannot bind to specified [`socket_address`]
+    pub async fn serve_tcp(self: &Arc<Self>, socket_address: &SocketAddr) -> Result<JoinHandle<()>> {
+        let listener = Arc::new(TcpListener::bind(socket_address).await?);
+        let this = Arc::clone(self);
+        Ok(tokio::spawn(async move {
+            loop {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let this = Arc::clone(&this);
+                    tokio::spawn(async move {
+                        let mut buffer = [0; Self::MAX_REQUEST_SIZE];
+                        let len = stream.read(&mut buffer).await?;
+                        #[allow(clippy::indexing_slicing)]
+                        if let Ok(request) = MinionRequest::from_bytes(&buffer[0..len]) {
+                            let response = this.response(&request);
+                            stream.write_all(&response.to_json().into_bytes()).await
+                        } else {
+                            // Invalid request
+                            Ok(())
+                        }
+                    });
+                };
+            }
+        }))
     }
 }
 
@@ -124,15 +157,15 @@ mod tests {
     use std::pin::Pin;
     use std::str::FromStr;
 
-    use tokio::net::UdpSocket;
+    use tokio::net::{TcpStream, UdpSocket};
 
     use super::*;
 
     #[test]
     fn local_minion() {
-        let minion_id = "test_minion";
-        let minion = Minion::new(&minion_id);
-        let request = MinionRequest::new(&"123");
+        let minion_id = "test_minion".to_owned();
+        let minion = Minion::new(minion_id.clone());
+        let request = MinionRequest::new("123".to_owned());
         let response = minion.response(&request);
 
         check_response(minion_id, &request, &response);
@@ -140,9 +173,9 @@ mod tests {
 
     #[test]
     fn serde() {
-        let minion_id = "test_minion";
-        let minion = Minion::new(minion_id);
-        let request = MinionRequest::new(&"123");
+        let minion_id = "test_minion".to_owned();
+        let minion = Minion::new(minion_id.clone());
+        let request = MinionRequest::new("123".to_owned());
 
         let serialized = minion.response(&request).to_json();
         println!("serialized = {}", serialized);
@@ -152,43 +185,96 @@ mod tests {
         check_response(minion_id, &request, &response);
     }
 
-    fn check_response(minion_name: &str, request: &MinionRequest, response: &MinionResponse) {
+    fn check_response(minion_name: String, request: &MinionRequest, response: &MinionResponse) {
         assert_eq!(minion_name, response.minion_id);
         assert_eq!(request.request_id, response.request_id);
     }
 
-
     #[tokio::test]
     async fn test_udp() -> Result<()> {
         let server_address = SocketAddr::new(IpAddr::from_str("127.0.0.2").unwrap(), 16236);
-        let minion_id = "test_minion";
-        tokio::spawn(async move {
-            Minion::new(minion_id).serve(&server_address).await
-        });
+        parallel_requests(
+            move |minion| async move {
+                minion.serve_udp(&server_address).await
+            },
+            move |id, bytes| async move {
+                let socket = UdpSocket::bind("0.0.0.0:0").await?;
+                socket.send_to(&bytes, &server_address).await?;
+                println!("UDP request {id} sent to {server_address}");
 
-        const TOTAL: usize = 5;
-        (0..TOTAL).fold(
-            Box::pin(async { Ok(()) as Result<()> }) as Pin<Box<dyn Future<Output = Result<()>>>>,
-            |prev, i| Box::pin(async move {
-                let next = async move {
-                    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+                let mut buffer = [0; 1024];
+                let (len, addr) = socket.recv_from(&mut buffer).await?;
+                assert_eq!(server_address, addr);
+                Ok((buffer, len))
+            }
+        ).await
+    }
 
-                    let request = MinionRequest::new(&"12345");
-                    socket.send_to(request.to_json().as_bytes(), &server_address).await?;
-                    println!("Request {} sent", i + 1);
+    #[tokio::test]
+    async fn test_tcp() -> Result<()> {
+        let server_address = SocketAddr::new(IpAddr::from_str("127.0.0.2").unwrap(), 16236);
+        parallel_requests(
+            move |minion| async move {
+                minion.serve_tcp(&server_address).await
+            },
+            move |id, bytes| async move {
+                let mut stream = TcpStream::connect(server_address).await?;
+                stream.write_all(&bytes).await?;
+                AsyncWriteExt::shutdown(&mut stream).await?;
+                println!("TCP request {id} sent to {server_address}");
 
-                    let mut buf = [0; 1024];
-                    let (len, addr) = socket.recv_from(&mut buf).await?;
+                let mut buffer = [0; 1024];
+                let len = stream.read(&mut buffer).await?;
+                Ok((buffer, len))
+            }
+        ).await
+    }
 
-                    assert_eq!(server_address, addr);
+    async fn parallel_requests<S, SR, C, CR>(start: S, communicate: C) -> Result<()>
+        where
+            S: Fn(Arc<Minion>) -> SR + Copy + 'static,
+            SR: Future<Output=Result<JoinHandle<()>>> + Send + 'static,
+            C: Fn(String, Vec<u8>) -> CR + Copy + 'static,
+            CR: Future<Output=Result<([u8; 1024], usize)>>,
+    {
+        let minion_id = "test_minion".to_owned();
+        tokio::spawn(start(Minion::new(minion_id.clone())));
+        parallel(5, |i| {
+            let minion_id = minion_id.clone();
+            async move {
+                let id = format!("12345_{i}");
+                let request = MinionRequest::new(id.clone());
+                let bytes = request.to_json().as_bytes().to_vec();
 
-                    let response = MinionResponse::from_bytes(&buf[0..len]).unwrap();
+                let (buffer, read) = communicate(id.clone(), bytes).await?;
+                let response = MinionResponse::from_bytes(&buffer[0..read]).unwrap();
 
-                    check_response(minion_id, &request, &response);
-                    println!("Request {} OK", i + 1);
-                    Ok(())
-                };
-                tokio::try_join!(prev, next).map(|_| ())
-            })).await
+                check_response(minion_id, &request, &response);
+                println!("Request {id} OK");
+                Ok(())
+            }
+        }).await?;
+        Ok(())
+    }
+
+    type PBFR<T> = Pin<Box<dyn Future<Output = Result<T>>>>;
+
+    fn parallel<T, F, FR>(n: usize, f: F) -> PBFR<Vec<T>>
+        where
+            T: 'static,
+            F: FnMut(usize) -> FR,
+            FR: Future<Output = Result<T>> + 'static,
+    {
+        (0..n)
+            .map(f)
+            .fold(
+                Box::pin(async { Ok(vec![]) as Result<Vec<T>>}),
+                |prev, next| Box::pin(async {
+                    tokio::try_join!(prev, next).map(|(mut p, n)| {
+                        p.push(n);
+                        p
+                    })
+                }),
+            )
     }
 }
