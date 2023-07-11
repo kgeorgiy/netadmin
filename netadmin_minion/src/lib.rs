@@ -2,6 +2,7 @@ use core::{fmt::Debug, future::Future, time::Duration};
 use std::{env, net::SocketAddr, path::Path, str, sync::Arc};
 
 use anyhow::{anyhow, Context, Error, Result};
+use async_trait::async_trait;
 use bytes::{Buf, BufMut};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -112,6 +113,38 @@ impl Packet {
 }
 
 //
+// Transmitter, MinionRequest
+
+#[async_trait]
+trait Transmitter {
+    async fn send(&mut self, packet: Packet) -> Result<()>;
+}
+
+#[async_trait]
+impl<T: AsyncWrite + Send + Unpin> Transmitter for T {
+    async fn send(&mut self, packet: Packet) -> Result<()> {
+        packet.write(self).await
+    }
+}
+
+struct UdpStream {
+    socket: Arc<UdpSocket>,
+    address: SocketAddr,
+}
+
+#[async_trait]
+impl Transmitter for UdpStream {
+    async fn send(&mut self, packet: Packet) -> Result<()> {
+        packet.send(&self.socket, &self.address).await
+    }
+}
+
+#[async_trait]
+trait RequestHandler {
+    async fn handle<T: Transmitter + Send>(self, minion: &Minion, transmitter: T) -> Result<()>;
+}
+
+//
 // InfoRequest, InfoResponse
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -124,10 +157,31 @@ impl InfoRequest {
     pub fn new(id: String) -> InfoRequest {
         InfoRequest { request_id: id }
     }
+
+    fn response(&self, minion: &Minion) -> InfoResponse {
+        InfoResponse {
+            minion_id: minion.id.clone(),
+            request_id: self.request_id.clone(),
+            os: env::consts::OS.to_owned(),
+            time_utc: Utc::now(),
+        }
+    }
 }
 
 impl Pack for InfoRequest {
     const PACKET_TYPE: u32 = 0x49_4E_46_4F; // INFO
+}
+
+#[async_trait]
+impl RequestHandler for InfoRequest {
+    async fn handle<T: Transmitter + Send>(
+        self,
+        minion: &Minion,
+        mut transmitter: T,
+    ) -> Result<()> {
+        let response = self.response(minion);
+        transmitter.send(response.to_packet()).await
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -143,6 +197,9 @@ impl Pack for InfoResponse {
     const PACKET_TYPE: u32 = 0x69_6E_66_6F; // info
 }
 
+//
+// Minion
+
 #[must_use]
 pub struct Minion {
     id: String,
@@ -152,16 +209,6 @@ impl Minion {
     #[must_use]
     pub fn new(id: String) -> Arc<Minion> {
         Arc::new(Minion { id })
-    }
-
-    fn response(&self, request: &InfoRequest) -> InfoResponse {
-        let id = self.id.clone();
-        InfoResponse {
-            minion_id: id,
-            request_id: request.request_id.clone(),
-            os: env::consts::OS.to_owned(),
-            time_utc: Utc::now(),
-        }
     }
 
     /// Serves minion information on UDP port
@@ -177,16 +224,13 @@ impl Minion {
         Ok(Self::spawn::<_, ()>("Serve UDP", async move {
             loop {
                 match Box::pin(Packet::receive(&socket)).await {
-                    Ok((request, addr)) => {
+                    Ok((request, address)) => {
                         let socket = Arc::clone(&socket);
                         let this = Arc::clone(&this);
                         Self::spawn("UDP packet", async move {
                             match InfoRequest::from_packet(&request) {
                                 Ok(request) => {
-                                    this.response(&request)
-                                        .to_packet()
-                                        .send(&socket, &addr)
-                                        .await
+                                    request.handle(&this, UdpStream { socket, address }).await
                                 }
                                 Err(error) => Err(error),
                             }
@@ -278,14 +322,13 @@ impl Minion {
         }))
     }
 
-    async fn communicate<T: AsyncRead + AsyncWrite + Unpin>(
+    async fn communicate<T: AsyncRead + AsyncWrite + Send + Unpin>(
         self: &Arc<Self>,
         mut stream: T,
     ) -> Result<()> {
         match InfoRequest::from_packet(&Packet::read(&mut stream).await?) {
             Ok(request) => {
-                let response = &self.response(&request);
-                response.to_packet().write(&mut stream).await?;
+                request.handle(self, &mut stream).await?;
                 AsyncWriteExt::shutdown(&mut stream).await?;
 
                 // Java TLS compatibility
@@ -391,7 +434,7 @@ mod tests {
         let minion_id = "test_minion".to_owned();
         let minion = Minion::new(minion_id.clone());
         let request = InfoRequest::new("123".to_owned());
-        let response = minion.response(&request);
+        let response = request.response(&minion);
 
         check_response(minion_id, &request, &response);
     }
@@ -402,7 +445,7 @@ mod tests {
         let minion = Minion::new(minion_id.clone());
         let request = InfoRequest::new("123".to_owned());
 
-        let serialized = serde_json::to_string(&minion.response(&request)).unwrap();
+        let serialized = serde_json::to_string(&request.response(&minion)).unwrap();
         println!("serialized = {}", serialized);
         let response = serde_json::from_str(&serialized).unwrap();
         println!("deserialized = {:?}", response);
