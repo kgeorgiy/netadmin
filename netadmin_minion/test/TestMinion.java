@@ -1,4 +1,7 @@
 import javax.net.ssl.*;
+import java.io.DataInputStream;
+import java.io.DataOutput;
+import java.io.DataOutputStream;
 import java.io.FileInputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -16,7 +19,7 @@ public final class TestMinion {
 
         final char[] password = "vc/iIcg1R/Zbuf55a/Yu7d35EvCX7rNPYgarD5KK8UAlzh7KZRYz5LQ1wxmSo8IZ36X7kytSrHQ6".toCharArray();
         final KeyStore jks = KeyStore.getInstance("JKS");
-        try (final FileInputStream is = new FileInputStream("../__keys/client.netadmin.test.jks")) {
+        try (final FileInputStream is = new FileInputStream("__keys/client.netadmin.test.jks")) {
             jks.load(is, password);
         }
 
@@ -28,18 +31,27 @@ public final class TestMinion {
         trustManagerFactory.init(jks);
         final TrustManager[] trustManagers = trustManagerFactory.getTrustManagers();
 
-        final SSLContext context = SSLContext.getInstance("TLSv1.3");
+        final SSLContext context = SSLContext.getInstance("TLSv1.2");
         context.init(keyManagers, trustManagers, null);
 
         final SSLSocketFactory socketFactory = context.getSocketFactory();
         for (int i = 0; i < 10; i++) {
-            try (final SSLSocket socket = (SSLSocket) socketFactory.createSocket("127.0.0.1", 6236)) {
-                socket.getOutputStream().write("{\"request_id\": \"hello\"}".getBytes(StandardCharsets.UTF_8));
-                socket.getOutputStream().flush();
+            try (
+                    final SSLSocket socket = (SSLSocket) socketFactory.createSocket("127.0.0.1", 6236);
+                    final DataInputStream in = new DataInputStream(socket.getInputStream());
+                    final DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+            ) {
+                final byte[] bytes = "{\"request_id\": \"hello\"}".getBytes(StandardCharsets.UTF_8);
+                out.writeInt(bytes.length);
+                out.writeInt(0x49_4E_46_4F);
+                out.write(bytes);
+                out.flush();
                 socket.shutdownOutput();
-                final byte[] buffer = new byte[1024];
-                final int read = socket.getInputStream().read(buffer);
-                System.out.println("Pass " + (i + 1) + ": " + new String(buffer, 0, read, StandardCharsets.UTF_8));
+
+                final int size = in.readInt();
+                in.readInt();
+                final byte[] buffer = in.readNBytes(size);
+                System.out.println("Pass " + (i + 1) + ": " + new String(buffer, StandardCharsets.UTF_8));
             }
         }
     }
