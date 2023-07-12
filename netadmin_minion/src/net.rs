@@ -1,3 +1,4 @@
+use core::time::Duration;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str;
@@ -10,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
+use tokio::time::sleep;
 use tokio_rustls::rustls::server::{AllowAnyAuthenticatedClient, NoClientAuth};
 use tokio_rustls::rustls::{Certificate, ClientConfig, PrivateKey, RootCertStore, ServerConfig};
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
@@ -433,16 +435,45 @@ impl TlsReceiver {
     }
 }
 
+#[derive(Clone)]
+pub struct TlsTransmitter {
+    stream: Arc<Mutex<TlsStream<TcpStream>>>,
+}
+
 #[async_trait]
-impl Receiver<Arc<Mutex<TlsStream<TcpStream>>>> for TlsReceiver {
-    async fn receive(&mut self) -> Result<(Packet, Arc<Mutex<TlsStream<TcpStream>>>)> {
+impl Transmitter for TlsTransmitter {
+    async fn send(&mut self, packet: Packet) -> Result<()> {
+        packet.write(&mut *self.stream.lock().await).await
+    }
+}
+
+impl Drop for TlsTransmitter {
+    fn drop(&mut self) {
+        const JAVA_SLEEP: Duration = Duration::from_millis(1);
+
+        let stream = Arc::clone(&self.stream);
+        tokio::spawn(async move {
+            let stream = &mut *stream.lock().await;
+            stream.shutdown().await.expect("shutdown socket");
+
+            // Java TLS compatibility
+            sleep(JAVA_SLEEP).await;
+        });
+    }
+}
+
+#[async_trait]
+impl Receiver<TlsTransmitter> for TlsReceiver {
+    async fn receive(&mut self) -> Result<(Packet, TlsTransmitter)> {
         match self.listener.accept().await.context("accept") {
             Ok((tcp_stream, _)) => {
                 let acceptor = self.acceptor.clone();
                 let mut tls_stream: TlsStream<TcpStream> = acceptor.accept(tcp_stream).await?;
                 Ok((
                     Packet::read(&mut tls_stream).await?,
-                    Arc::new(Mutex::new(tls_stream)),
+                    TlsTransmitter {
+                        stream: Arc::new(Mutex::new(tls_stream)),
+                    },
                 ))
             }
             // Self::spawn(

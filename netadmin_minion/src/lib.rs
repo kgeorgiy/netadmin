@@ -1,4 +1,4 @@
-use core::{fmt::Debug, future::Future, mem, pin::Pin, time::Duration};
+use core::{fmt::Debug, future::Future, mem, pin::Pin};
 use std::{env, net::SocketAddr, str, sync::Arc};
 
 use anyhow::{anyhow, Context, Error, Result};
@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::{task::JoinHandle, time::sleep};
+use tokio::task::JoinHandle;
 
 use crate::net::{
     JsonTransmitter, Message, MessageTransmitter, Packet, Receiver, TcpReceiver, TlsReceiver,
@@ -18,16 +18,15 @@ pub mod net;
 //
 // RequestHandler
 
+type Handler<T> =
+    Box<dyn FnOnce(Arc<Minion>, T) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send>;
+
 #[async_trait]
 trait RequestHandler {
     async fn handle<T: MessageTransmitter>(self, minion: Arc<Minion>, transmitter: T)
         -> Result<()>;
 
-    fn handler<T: MessageTransmitter>(
-        packet: &Packet,
-    ) -> Result<
-        Box<dyn FnOnce(Arc<Minion>, T) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send>,
-    >
+    fn handler<T: MessageTransmitter>(packet: &Packet) -> Result<Handler<T>>
     where
         Self: Message,
     {
@@ -308,15 +307,9 @@ impl Minion {
                         let this = Arc::clone(&this);
                         let handlers = handlers.clone();
                         Self::spawn(&format!("{protocol} connection"), async move {
-                            let transmitter = JsonTransmitter::new(transmitter);
                             for handler in &handlers {
                                 if let Ok(request) = handler(&packet) {
-                                    request(this, transmitter).await?;
-                                    // AsyncWriteExt::shutdown(&mut stream).await?;
-
-                                    // Java TLS compatibility
-                                    sleep(Duration::from_millis(1)).await;
-                                    return Ok(());
+                                    return request(this, JsonTransmitter::new(transmitter)).await;
                                 }
                             }
 
@@ -752,7 +745,7 @@ mod tests {
         Ok(())
     }
 
-    fn check_out(expected: &[&str], actual: &Vec<u8>) {
+    fn check_out(expected: &[&str], actual: &[u8]) {
         let actual =
             str::from_utf8(actual).map(|out| out.lines().map(str::trim).collect::<Vec<_>>());
         assert_eq!(Ok(expected.to_vec()), actual);
