@@ -5,9 +5,8 @@ use std::process::Command;
 use std::{fs, str};
 
 use anyhow::{anyhow, Context, Result};
+use netadmin_minion::Minion;
 use rcgen::{Certificate, CertificateParams, DistinguishedName, DnType};
-
-use netadmin_minion::TlsConfig;
 
 struct CertificateFiles<'a> {
     name: &'a str,
@@ -87,8 +86,8 @@ fn main() -> Result<()> {
     let dir = "__keys";
     let pass = "resources/certgen/store.pass";
 
-    let minion = CertificateFiles::new(TlsConfig::MINION_DOMAIN, dir, pass);
-    let client = CertificateFiles::new(TlsConfig::CLIENT_DOMAIN, dir, pass);
+    let minion = CertificateFiles::new(Minion::MINION_DOMAIN, dir, pass);
+    let client = CertificateFiles::new(Minion::CLIENT_DOMAIN, dir, pass);
 
     minion.generate()?;
     client.generate()?;

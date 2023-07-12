@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use netadmin_minion::{Minion, TlsConfig};
+use netadmin_minion::{net::TlsServerConfig, Minion};
 
 #[tokio::main]
 #[allow(clippy::unwrap_used)]
@@ -13,11 +13,11 @@ async fn main() -> Result<()> {
     let handle = minion
         .serve_tls(
             &SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 6236),
-            &TlsConfig {
-                minion_certificates: Path::new("__keys/minion.netadmin.test.crt"),
-                minion_key: Path::new("__keys/minion.netadmin.test.key"),
-                client_certificates: Some(Path::new("__keys/client.netadmin.test.crt")),
-            },
+            &TlsServerConfig::new(
+                Path::new("__keys/minion.netadmin.test.key"),
+                Path::new("__keys/minion.netadmin.test.crt"),
+                Some(Path::new("__keys/client.netadmin.test.crt")),
+            ),
         )
         .await?;
     Ok(handle.await?)

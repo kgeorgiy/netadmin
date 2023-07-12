@@ -1,20 +1,20 @@
 use core::{fmt::Debug, future::Future, time::Duration};
-use std::{env, net::SocketAddr, path::Path, str, sync::Arc};
+use std::{env, net::SocketAddr, str, sync::Arc};
 
-use anyhow::{anyhow, Context, Error, Result};
-use async_trait::async_trait;
+use anyhow::{Error, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, UdpSocket};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
-use tokio_rustls::rustls::server::{AllowAnyAuthenticatedClient, NoClientAuth};
-use tokio_rustls::rustls::{Certificate, PrivateKey, RootCertStore, ServerConfig};
-use tokio_rustls::TlsAcceptor;
-use net::{Message, MessageTransmitter, Packet, JsonTransmitter, UdpStream};
 
-mod net;
+use async_trait::async_trait;
+
+use crate::net::{
+    JsonTransmitter, Message, MessageTransmitter, Receiver, TcpReceiver, TlsReceiver,
+    TlsServerConfig, Transmitter, UdpReceiver,
+};
+
+pub mod net;
 
 //
 // RequestHandler
@@ -89,6 +89,12 @@ pub struct Minion {
 }
 
 impl Minion {
+    /// Minion host name for TLS certificates
+    pub const MINION_DOMAIN: &'static str = "minion.netadmin.test";
+
+    /// Server host name for TLS certificates
+    pub const CLIENT_DOMAIN: &'static str = "client.netadmin.test";
+
     #[must_use]
     pub fn new(id: String) -> Arc<Minion> {
         Arc::new(Minion { id })
@@ -102,32 +108,67 @@ impl Minion {
         self: &Arc<Self>,
         socket_address: &SocketAddr,
     ) -> Result<JoinHandle<()>> {
-        let socket = Arc::new(UdpSocket::bind(socket_address).await?);
+        Ok(self.serve("UDP", UdpReceiver::new(socket_address).await?))
+    }
+
+    /// Serves minion information on TCP port
+    ///
+    /// # Errors
+    /// Returns error if cannot bind to specified `socket_address`
+    pub async fn serve_tcp(
+        self: &Arc<Self>,
+        socket_address: &SocketAddr,
+    ) -> Result<JoinHandle<()>> {
+        Ok(self.serve("TCP", TcpReceiver::new(socket_address).await?))
+    }
+
+    /// Serves full minion
+    ///
+    /// # Errors
+    /// Returns error if
+    /// - cannot bind to specified `socket_address`
+    /// - TLS `config` is invalid
+    pub async fn serve_tls(
+        self: &Arc<Self>,
+        socket_address: &SocketAddr,
+        config: &TlsServerConfig<'_>,
+    ) -> Result<JoinHandle<()>> {
+        Ok(self.serve("TLS", TlsReceiver::new(socket_address, config).await?))
+    }
+
+    fn serve<T, R>(self: &Arc<Self>, protocol: &str, mut receiver: R) -> JoinHandle<()>
+    where
+        T: Transmitter + Unpin + Send + Sync + 'static,
+        R: Receiver<T> + Send + 'static,
+    {
+        let protocol = protocol.to_owned();
         let this = Arc::clone(self);
-        Ok(Self::spawn::<_, ()>("Serve UDP", async move {
+        Self::spawn::<_, ()>(&format!("Serve {protocol}"), async move {
             loop {
-                match Box::pin(Packet::receive(&socket)).await {
-                    Ok((request, address)) => {
-                        let socket = Arc::clone(&socket);
+                match receiver.receive().await {
+                    Ok((packet, transmitter)) => {
                         let this = Arc::clone(&this);
-                        Self::spawn("UDP packet", async move {
-                            match InfoRequest::from_packet(&request) {
+                        Self::spawn(&format!("{protocol} connection"), async move {
+                            match InfoRequest::from_packet(&packet) {
                                 Ok(request) => {
                                     request
-                                        .handle(
-                                            &this,
-                                            JsonTransmitter::new(UdpStream::new(&socket, &address)),
-                                        )
-                                        .await
+                                        .handle(&this, JsonTransmitter::new(transmitter))
+                                        .await?;
+                                    // AsyncWriteExt::shutdown(&mut stream).await?;
+
+                                    // Java TLS compatibility
+                                    sleep(Duration::from_millis(1)).await;
+
+                                    Ok(())
                                 }
                                 Err(error) => Err(error),
                             }
                         });
                     }
-                    Err(error) => Self::log_error("UDP packet", &error),
+                    Err(error) => Self::log_error(&format!("{protocol} accept"), &error),
                 }
             }
-        }))
+        })
     }
 
     fn spawn<F, T>(context: &str, future: F) -> JoinHandle<()>
@@ -153,150 +194,6 @@ impl Minion {
     fn log_error(context: &str, error: &Error) {
         eprintln!("{context}: Error {error}");
     }
-
-    /// Serves minion information on TCP port
-    ///
-    /// # Errors
-    /// Returns error if cannot bind to specified `socket_address`
-    pub async fn serve_tcp(
-        self: &Arc<Self>,
-        socket_address: &SocketAddr,
-    ) -> Result<JoinHandle<()>> {
-        let listener = Arc::new(TcpListener::bind(socket_address).await?);
-        let this = Arc::clone(self);
-        Ok(Self::spawn::<_, ()>("Serve TCP", async move {
-            loop {
-                match listener.accept().await.context("accept") {
-                    Ok((stream, _)) => {
-                        let this = Arc::clone(&this);
-                        Self::spawn(
-                            "TCP connection",
-                            async move { this.communicate(stream).await },
-                        );
-                    }
-                    Err(error) => Self::log_error("TCP accept", &error),
-                };
-            }
-        }))
-    }
-
-    /// Serves full minion
-    ///
-    /// # Errors
-    /// Returns error if
-    /// - cannot bind to specified `socket_address`
-    /// - TLS `config` is invalid
-    pub async fn serve_tls(
-        self: &Arc<Self>,
-        socket_address: &SocketAddr,
-        config: &TlsConfig<'_>,
-    ) -> Result<JoinHandle<()>> {
-        let acceptor = config.acceptor()?;
-        let listener = TcpListener::bind(&socket_address).await?;
-        let this = Arc::clone(self);
-        Ok(Self::spawn::<_, ()>("Serve TLS", async move {
-            loop {
-                match listener.accept().await.context("accept") {
-                    Ok((stream, _)) => {
-                        let acceptor = acceptor.clone();
-                        let this = Arc::clone(&this);
-                        Self::spawn("TLS connection", async move {
-                            this.communicate(acceptor.accept(stream).await?).await
-                        });
-                    }
-                    Err(error) => Self::log_error("TLS accept", &error),
-                }
-            }
-        }))
-    }
-
-    async fn communicate<T: AsyncRead + AsyncWrite + Send + Unpin + Sync>(
-        self: &Arc<Self>,
-        mut stream: T,
-    ) -> Result<()> {
-        match InfoRequest::from_packet(&Packet::read(&mut stream).await?) {
-            Ok(request) => {
-                request
-                    .handle(
-                        self,
-                        JsonTransmitter::new(&mut stream),
-                    )
-                    .await?;
-                AsyncWriteExt::shutdown(&mut stream).await?;
-
-                // Java TLS compatibility
-                sleep(Duration::from_millis(1)).await;
-
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
-    }
-}
-
-/// TLS configuration
-#[allow(clippy::exhaustive_structs)]
-pub struct TlsConfig<'a> {
-    pub minion_certificates: &'a Path,
-    pub minion_key: &'a Path,
-    pub client_certificates: Option<&'a Path>,
-}
-
-impl<'a> TlsConfig<'a> {
-    /// Minion host name for TLS certificates
-    pub const MINION_DOMAIN: &'static str = "minion.netadmin.test";
-
-    /// Server host name for TLS certificates
-    pub const CLIENT_DOMAIN: &'static str = "client.netadmin.test";
-
-    pub(crate) fn acceptor(&self) -> Result<TlsAcceptor> {
-        let certificates = Self::load_certificates(self.minion_certificates)?;
-        let key = Self::load_key(self.minion_key)?;
-        let config =
-            ServerConfig::builder()
-                .with_safe_defaults()
-                .with_client_cert_verifier(self.client_certificates.map_or(
-                    Ok(NoClientAuth::boxed()) as Result<_>,
-                    |path| {
-                        Ok(AllowAnyAuthenticatedClient::new(Self::load_root_cert(path)?).boxed())
-                    },
-                )?)
-                .with_single_cert(certificates, key)
-                .context("Invalid private key")?;
-        Ok(TlsAcceptor::from(Arc::new(config)))
-    }
-
-    pub(crate) fn load_certificates(path: &Path) -> Result<Vec<Certificate>> {
-        rustls_pemfile::certs(&mut Self::open(path, "Certificates file")?)
-            .context(format!("Invalid certificates file {path:?}"))
-            .and_then(|certs| match certs.len() {
-                0 => Err(anyhow!("No certificates found in {path:?}")),
-                _ => Ok(certs.into_iter().map(Certificate).collect()),
-            })
-    }
-
-    pub(crate) fn load_key(path: &Path) -> Result<PrivateKey> {
-        rustls_pemfile::pkcs8_private_keys(&mut Self::open(path, "Private key")?)
-            .context(format!("Invalid key file {path:?}"))
-            .and_then(|keys| match keys.len() {
-                0 => Err(anyhow!("No private keys found in {path:?}")),
-                1 => Ok(PrivateKey(keys.into_iter().next().expect("index checked"))),
-                _ => Err(anyhow!("Multiple private keys found in {path:?}")),
-            })
-    }
-
-    fn open(path: &Path, context: &str) -> Result<std::io::BufReader<std::fs::File>> {
-        let file = std::fs::File::open(path).context(format!("{context} {path:?} not found"))?;
-        Ok(std::io::BufReader::new(file))
-    }
-
-    pub(crate) fn load_root_cert(path: &Path) -> Result<RootCertStore> {
-        let mut root_cert_store = RootCertStore::empty();
-        for certificate in Self::load_certificates(path)? {
-            root_cert_store.add(&certificate)?;
-        }
-        Ok(root_cert_store)
-    }
 }
 
 #[cfg(test)]
@@ -311,9 +208,12 @@ mod tests {
     use std::sync::atomic::{AtomicU16, Ordering};
 
     use tokio::net::{TcpStream, UdpSocket};
-    use tokio_rustls::rustls::{ClientConfig, ServerName};
+    use tokio_rustls::rustls::ServerName;
     use tokio_rustls::TlsConnector;
+
     use net::Message;
+
+    use crate::net::{TlsAuth, TlsClientConfig, TlsServerConfig};
 
     use super::*;
 
@@ -487,35 +387,31 @@ mod tests {
     async fn test_tls(host: &str, minion_auth: Option<()>, client_auth: bool) -> Result<()> {
         let server_address = SocketAddr::new(IpAddr::from_str(host)?, port());
 
-        let builder = ClientConfig::builder()
-            .with_safe_defaults()
-            .with_root_certificates(TlsConfig::load_root_cert(&tls_path(
-                TlsConfig::MINION_DOMAIN,
-                "crt",
-            ))?);
-        let config = Arc::new(if client_auth {
-            builder.with_single_cert(
-                TlsConfig::load_certificates(&tls_path(TlsConfig::CLIENT_DOMAIN, "crt"))?,
-                TlsConfig::load_key(&tls_path(TlsConfig::CLIENT_DOMAIN, "key"))?,
-            )?
-        } else {
-            builder.with_no_client_auth()
-        });
+        let server_certificate = &tls_path(Minion::MINION_DOMAIN, "crt");
+        let client_certificate = &tls_path(Minion::CLIENT_DOMAIN, "crt");
+        let client_key = &tls_path(Minion::CLIENT_DOMAIN, "key");
+        let config = TlsClientConfig::new(
+            server_certificate,
+            if client_auth {
+                Some(TlsAuth::new(client_key, client_certificate))
+            } else {
+                None
+            },
+        );
+        let config = Arc::new(config.config()?);
 
         parallel_requests(
             move |minion| async move {
                 let client_certificates_file =
-                    minion_auth.map(|_| tls_path(TlsConfig::CLIENT_DOMAIN, "crt"));
+                    minion_auth.map(|_| tls_path(Minion::CLIENT_DOMAIN, "crt"));
                 minion
                     .serve_tls(
                         &server_address,
-                        &TlsConfig {
-                            minion_certificates: &tls_path(TlsConfig::MINION_DOMAIN, "crt"),
-                            minion_key: &tls_path(TlsConfig::MINION_DOMAIN, "key"),
-                            client_certificates: client_certificates_file
-                                .as_ref()
-                                .map(PathBuf::as_path),
-                        },
+                        &TlsServerConfig::new(
+                            &tls_path(Minion::MINION_DOMAIN, "key"),
+                            &tls_path(Minion::MINION_DOMAIN, "crt"),
+                            client_certificates_file.as_ref().map(PathBuf::as_path),
+                        ),
                     )
                     .await
             },
@@ -523,7 +419,7 @@ mod tests {
                 let config = Arc::clone(&config);
                 async move {
                     let connector = TlsConnector::from(config);
-                    let domain = ServerName::try_from(TlsConfig::MINION_DOMAIN)?;
+                    let domain = ServerName::try_from(Minion::MINION_DOMAIN)?;
                     let stream = TcpStream::connect(server_address).await?;
 
                     let mut stream = connector.connect(domain, stream).await?;
