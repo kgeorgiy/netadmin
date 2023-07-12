@@ -15,9 +15,9 @@ use tokio_rustls::rustls::{Certificate, PrivateKey, RootCertStore, ServerConfig}
 use tokio_rustls::TlsAcceptor;
 
 //
-// Pack
+// Message
 
-trait Pack: Serialize + for<'a> Deserialize<'a> {
+trait Message: Serialize + for<'a> Deserialize<'a> + Send + Sync {
     const PACKET_TYPE: u32;
 
     fn to_packet(&self) -> Packet {
@@ -113,11 +113,27 @@ impl Packet {
 }
 
 //
-// Transmitter, MinionRequest
+// Transmitter, TypedTransmitter, RequestHandler
 
 #[async_trait]
 trait Transmitter {
     async fn send(&mut self, packet: Packet) -> Result<()>;
+}
+
+#[async_trait]
+trait MessageTransmitter {
+    async fn send<M: Message>(&mut self, message: M) -> Result<()>;
+}
+
+struct JsonTransmitter<T: Transmitter> {
+    transmitter: T,
+}
+
+#[async_trait]
+impl<T: Transmitter + Send + Sync> MessageTransmitter for JsonTransmitter<T> {
+    async fn send<M: Message>(&mut self, message: M) -> Result<()> {
+        self.transmitter.send(message.to_packet()).await
+    }
 }
 
 #[async_trait]
@@ -141,7 +157,11 @@ impl Transmitter for UdpStream {
 
 #[async_trait]
 trait RequestHandler {
-    async fn handle<T: Transmitter + Send>(self, minion: &Minion, transmitter: T) -> Result<()>;
+    async fn handle<T: MessageTransmitter + Send>(
+        self,
+        minion: &Minion,
+        transmitter: T,
+    ) -> Result<()>;
 }
 
 //
@@ -168,19 +188,18 @@ impl InfoRequest {
     }
 }
 
-impl Pack for InfoRequest {
+impl Message for InfoRequest {
     const PACKET_TYPE: u32 = 0x49_4E_46_4F; // INFO
 }
 
 #[async_trait]
 impl RequestHandler for InfoRequest {
-    async fn handle<T: Transmitter + Send>(
+    async fn handle<T: MessageTransmitter + Send>(
         self,
         minion: &Minion,
         mut transmitter: T,
     ) -> Result<()> {
-        let response = self.response(minion);
-        transmitter.send(response.to_packet()).await
+        transmitter.send(self.response(minion)).await
     }
 }
 
@@ -193,7 +212,7 @@ pub struct InfoResponse {
     time_utc: DateTime<Utc>,
 }
 
-impl Pack for InfoResponse {
+impl Message for InfoResponse {
     const PACKET_TYPE: u32 = 0x69_6E_66_6F; // info
 }
 
@@ -230,7 +249,14 @@ impl Minion {
                         Self::spawn("UDP packet", async move {
                             match InfoRequest::from_packet(&request) {
                                 Ok(request) => {
-                                    request.handle(&this, UdpStream { socket, address }).await
+                                    request
+                                        .handle(
+                                            &this,
+                                            JsonTransmitter {
+                                                transmitter: UdpStream { socket, address },
+                                            },
+                                        )
+                                        .await
                                 }
                                 Err(error) => Err(error),
                             }
@@ -322,13 +348,20 @@ impl Minion {
         }))
     }
 
-    async fn communicate<T: AsyncRead + AsyncWrite + Send + Unpin>(
+    async fn communicate<T: AsyncRead + AsyncWrite + Send + Unpin + Sync>(
         self: &Arc<Self>,
         mut stream: T,
     ) -> Result<()> {
         match InfoRequest::from_packet(&Packet::read(&mut stream).await?) {
             Ok(request) => {
-                request.handle(self, &mut stream).await?;
+                request
+                    .handle(
+                        self,
+                        JsonTransmitter {
+                            transmitter: &mut stream,
+                        },
+                    )
+                    .await?;
                 AsyncWriteExt::shutdown(&mut stream).await?;
 
                 // Java TLS compatibility
