@@ -6,11 +6,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::net::{
-    JsonTransmitter, Message, MessageTransmitter, Packet, Receiver, TcpReceiver, TlsReceiver,
-    TlsServerConfig, Transmitter, UdpReceiver,
+    JsonTransmitter, Message, MessageTransmitter, Packet, Receiver, TcpReceiver, TlsListener,
+    TlsReceiver, TlsServerConfig, TlsTransmitter, Transmitter, UdpReceiver,
 };
 
 pub mod net;
@@ -70,7 +71,7 @@ impl RequestHandler for InfoRequest {
     async fn handle<T: MessageTransmitter>(
         self,
         minion: Arc<Minion>,
-        mut transmitter: T,
+        transmitter: T,
     ) -> Result<()> {
         transmitter.send(self.response(&minion)).await
     }
@@ -111,13 +112,15 @@ impl Message for ExecRequest {
 }
 
 impl ExecRequest {
-    fn transmit_std<T: MessageTransmitter, R: AsyncRead + Send + Unpin + 'static>(
+    fn copy<T: MessageTransmitter, R: AsyncRead + Send + Unpin + 'static>(
         self: Arc<Self>,
-        mut stream: R,
-        mut transmitter: T,
+        context: &'static str,
+        stream: &mut Option<R>,
+        transmitter: T,
         stderr: bool,
-    ) {
-        Minion::spawn("Exec", async move {
+    ) -> Result<()> {
+        let mut stream = stream.take().context(context)?;
+        Minion::spawn(&format!("Exec ({context})"), async move {
             let mut buffer = [0; 0x1000];
             loop {
                 let n = stream.read(&mut buffer).await?;
@@ -139,43 +142,32 @@ impl ExecRequest {
                     .await?;
             }
         });
+        Ok(())
     }
 }
 
 #[async_trait]
 impl RequestHandler for ExecRequest {
-    async fn handle<T: MessageTransmitter>(
-        self,
-        _minion: Arc<Minion>,
-        mut transmitter: T,
-    ) -> Result<()> {
+    async fn handle<T: MessageTransmitter>(self, _minion: Arc<Minion>, tx: T) -> Result<()> {
         use std::process::Stdio;
         use tokio::process::Command;
 
-        let stdout = self
+        let sin = self
             .stdin
             .as_ref()
             .map_or(Stdio::null(), |_| Stdio::piped());
 
         let mut child = Command::new(self.command.clone())
             .args(self.args.clone())
-            .stdout(stdout)
-            .stdin(Stdio::piped())
+            .stdin(sin)
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .context("failed to spawn command")?;
 
         let this = &Arc::new(self);
-        Arc::clone(this).transmit_std(
-            child.stdout.take().context("stdout")?,
-            transmitter.clone(),
-            false,
-        );
-        Arc::clone(this).transmit_std(
-            child.stderr.take().context("stderr")?,
-            transmitter.clone(),
-            !this.join_stderr,
-        );
+        Arc::clone(this).copy("stdout", &mut child.stdout, tx.clone(), false)?;
+        Arc::clone(this).copy("stderr", &mut child.stderr, tx.clone(), !this.join_stderr)?;
 
         if let Some(ref data) = this.stdin {
             let mut stdin = child.stdin.take().expect("piped stdin");
@@ -188,13 +180,12 @@ impl RequestHandler for ExecRequest {
             .wait()
             .await
             .expect("child process encountered an error");
-        transmitter
-            .send(ExecResult {
-                request_id: this.request_id.clone(),
-                exit_code: status.code().unwrap_or(ExecResult::UNDEFINED_EXIT_CODE),
-                exit_comment: format!("{status}"),
-            })
-            .await
+        tx.send(ExecResult {
+            request_id: this.request_id.clone(),
+            exit_code: status.code().unwrap_or(ExecResult::UNDEFINED_EXIT_CODE),
+            exit_comment: format!("{status}"),
+        })
+        .await
     }
 }
 
@@ -233,6 +224,85 @@ impl ExecResult {
 
 impl Message for ExecResult {
     const PACKET_TYPE: u32 = u32::from_be_bytes(*b"exer");
+}
+
+//
+// Legacy
+
+struct LegacyReceiver {
+    listener: TlsListener,
+}
+
+impl LegacyReceiver {
+    async fn new(socket_address: &SocketAddr, config: &TlsServerConfig) -> Result<Self> {
+        Ok(Self {
+            listener: TlsListener::new(socket_address, config).await?,
+        })
+    }
+}
+
+#[async_trait]
+impl Receiver<Arc<Mutex<LegacyTransmitter>>> for LegacyReceiver {
+    async fn receive(&mut self) -> Result<(Packet, Arc<Mutex<LegacyTransmitter>>)> {
+        let (mut transmitter, _addr) = self.listener.accept().await?;
+
+        let request = {
+            let stream = transmitter.stream();
+            let mut buffer = vec![0; stream.read_u32().await? as usize];
+            stream.read_exact(&mut buffer).await?;
+            ExecRequest {
+                request_id: "legacy".to_owned(),
+                command: if env::consts::OS == "windows" {
+                    "bash"
+                } else {
+                    "/bin/bash"
+                }
+                .to_owned(),
+                args: vec!["-c".to_owned(), String::from_utf8(buffer)?],
+                stdin: None,
+                join_stderr: true,
+            }
+        };
+
+        Ok((
+            request.to_packet(),
+            Arc::new(Mutex::new(LegacyTransmitter { transmitter })),
+        ))
+    }
+}
+
+struct LegacyTransmitter {
+    transmitter: TlsTransmitter,
+}
+
+impl LegacyTransmitter {
+    const OUTPUT: u32 = 0x1234_5678;
+    const RESULT: u32 = 0;
+}
+
+#[async_trait]
+impl Transmitter for Arc<Mutex<LegacyTransmitter>> {
+    async fn send(&self, packet: Packet) -> Result<()> {
+        let mut guard = self.lock().await;
+        let stream = guard.transmitter.stream();
+        match packet.ty() {
+            ExecOutput::PACKET_TYPE => {
+                let output = ExecOutput::from_packet(&packet)?.stdout;
+                stream.write_u32(LegacyTransmitter::OUTPUT).await?;
+                stream.write_u32(output.len() as u32).await?;
+                stream.write_all(&output).await?;
+            }
+            ExecResult::PACKET_TYPE => {
+                stream.write_u32(LegacyTransmitter::RESULT).await?;
+                stream
+                    .write_i32(ExecResult::from_packet(&packet)?.exit_code)
+                    .await?;
+            }
+            _ => return Err(anyhow!("Unknown packet type {}", packet.ty())),
+        };
+        stream.flush().await?;
+        Ok(())
+    }
 }
 
 //
@@ -286,9 +356,23 @@ impl Minion {
     pub async fn serve_tls(
         self: &Arc<Self>,
         socket_address: &SocketAddr,
-        config: &TlsServerConfig<'_>,
+        config: &TlsServerConfig,
     ) -> Result<JoinHandle<()>> {
         Ok(self.serve("TLS", TlsReceiver::new(socket_address, config).await?))
+    }
+
+    /// Serves legacy (Scala) compatible minion
+    ///
+    /// # Errors
+    /// Returns error if
+    /// - cannot bind to specified `socket_address`
+    /// - TLS `config` is invalid
+    pub async fn serve_legacy(
+        self: &Arc<Self>,
+        socket_address: &SocketAddr,
+        config: &TlsServerConfig,
+    ) -> Result<JoinHandle<()>> {
+        Ok(self.serve("Legacy", LegacyReceiver::new(socket_address, config).await?))
     }
 
     fn serve<T, R>(self: &Arc<Self>, protocol: &str, mut receiver: R) -> JoinHandle<()>
@@ -343,7 +427,12 @@ impl Minion {
 
     #[allow(clippy::use_debug, clippy::print_stderr)]
     fn log_error(context: &str, error: &Error) {
-        eprintln!("{context}: Error {error}");
+        let causes: String = error
+            .chain()
+            .skip(1)
+            .map(|err| format!("\n    Caused by: {err}"))
+            .collect();
+        eprintln!("{context}: Error {error}{causes}");
     }
 }
 
@@ -368,7 +457,8 @@ mod tests {
 
     use tokio::io::{AsyncRead, AsyncWrite};
     use tokio::net::{TcpStream, UdpSocket};
-    use tokio_rustls::rustls::ServerName;
+    use tokio_rustls::client::TlsStream;
+    use tokio_rustls::rustls::{ClientConfig, ServerName};
     use tokio_rustls::TlsConnector;
 
     use net::Message;
@@ -547,44 +637,53 @@ mod tests {
     }
 
     async fn test_tls(host: &str, minion_auth: Option<()>, client_auth: bool) -> Result<()> {
-        let server_certificate = &tls_path(Minion::MINION_DOMAIN, "crt");
-        let client_certificate = &tls_path(Minion::CLIENT_DOMAIN, "crt");
-        let client_key = &tls_path(Minion::CLIENT_DOMAIN, "key");
-        let config = TlsClientConfig::new(
-            server_certificate,
-            client_auth.then(|| TlsAuth::new(client_key, client_certificate)),
-        );
-        let config = Arc::new(config.config()?);
+        let config = tls_client_config(client_auth)?;
 
         let server_address = new_socket_addr(host)?;
         parallel_requests(
             move |minion| async move {
-                let client_certificates_file =
-                    minion_auth.map(|_| tls_path(Minion::CLIENT_DOMAIN, "crt"));
                 minion
-                    .serve_tls(
-                        &server_address,
-                        &TlsServerConfig::new(
-                            &tls_path(Minion::MINION_DOMAIN, "key"),
-                            &tls_path(Minion::MINION_DOMAIN, "crt"),
-                            client_certificates_file.as_deref(),
-                        ),
-                    )
+                    .serve_tls(&server_address, &tls_minion_config(minion_auth))
                     .await
             },
             move |id, packet| {
                 let config = Arc::clone(&config);
                 async move {
-                    let connector = TlsConnector::from(config);
-                    let domain = ServerName::try_from(Minion::MINION_DOMAIN)?;
-                    let stream = TcpStream::connect(server_address).await?;
-
-                    let mut stream = connector.connect(domain, stream).await?;
+                    let mut stream = tls_connect(server_address, config).await?;
                     communicate("TLS", id, &server_address, packet, &mut stream).await
                 }
             },
         )
         .await
+    }
+
+    async fn tls_connect(
+        server_address: SocketAddr,
+        config: Arc<ClientConfig>,
+    ) -> Result<TlsStream<TcpStream>> {
+        let connector = TlsConnector::from(config);
+        let domain = ServerName::try_from(Minion::MINION_DOMAIN)?;
+        let stream = TcpStream::connect(server_address).await?;
+        Ok(connector.connect(domain, stream).await?)
+    }
+
+    fn tls_minion_config(minion_auth: Option<()>) -> TlsServerConfig {
+        let client_certificates_file = minion_auth.map(|_| tls_path(Minion::CLIENT_DOMAIN, "crt"));
+        TlsServerConfig::new(
+            &tls_path(Minion::MINION_DOMAIN, "key"),
+            &tls_path(Minion::MINION_DOMAIN, "crt"),
+            client_certificates_file.as_deref(),
+        )
+    }
+
+    fn tls_client_config(client_auth: bool) -> Result<Arc<ClientConfig>, Error> {
+        let client_certificate = &tls_path(Minion::CLIENT_DOMAIN, "crt");
+        let client_key = &tls_path(Minion::CLIENT_DOMAIN, "key");
+        let config = TlsClientConfig::new(
+            &tls_path(Minion::MINION_DOMAIN, "crt"),
+            client_auth.then(|| TlsAuth::new(client_key, client_certificate)),
+        );
+        Ok(Arc::new(config.config()?))
     }
 
     async fn communicate<T: AsyncRead + AsyncWrite + Unpin>(
@@ -599,33 +698,33 @@ mod tests {
         Packet::read(stream).await
     }
 
-    struct ExecTransmitter {
+    struct ExecTest {
         request_id: String,
         stdout: Vec<u8>,
         stderr: Vec<u8>,
         result: Option<ExecResult>,
     }
 
-    impl ExecTransmitter {
-        fn new(request_id: String) -> Self {
-            Self {
-                request_id,
+    impl ExecTest {
+        fn new(request_id: &str) -> Arc<Mutex<Self>> {
+            Arc::new(Mutex::new(Self {
+                request_id: request_id.to_owned(),
                 stdout: vec![],
                 stderr: vec![],
                 result: None,
-            }
+            }))
         }
     }
 
     #[async_trait]
-    impl MessageTransmitter for Arc<Mutex<ExecTransmitter>> {
-        async fn send<M: Message + 'static>(&mut self, mut message: M) -> Result<()> {
+    impl MessageTransmitter for Arc<Mutex<ExecTest>> {
+        async fn send<M: Message + 'static>(&self, mut message: M) -> Result<()> {
             let this = &mut *self.lock().unwrap();
             let message = &mut message as &mut dyn Any;
             if let Some(message) = message.downcast_mut::<ExecOutput>() {
                 assert_eq!(this.request_id, message.request_id);
-                println!("OUT: {:?}", str::from_utf8(&message.stdout));
-                println!("ERR: {:?}", str::from_utf8(&message.stderr));
+                println!("    OUT: {:?}", str::from_utf8(&message.stdout));
+                println!("    ERR: {:?}", str::from_utf8(&message.stderr));
                 this.stdout.extend_from_slice(&message.stdout);
                 this.stderr.extend_from_slice(&message.stderr);
             } else if let Some(message) = message.downcast_mut::<ExecResult>() {
@@ -729,26 +828,29 @@ mod tests {
         stderr: &[&str],
     ) -> Result<()> {
         let request = exec_request(cmd, bash);
-        let output = &Arc::new(Mutex::new(ExecTransmitter::new(request.request_id.clone())));
+        let output = &ExecTest::new(&request.request_id);
         request
             .handle(Minion::new("test_minion"), Arc::clone(output))
             .await?;
 
-        let output = &*output.lock().unwrap();
-        check_out(stderr, &output.stderr);
-        check_out(stdout, &output.stdout);
+        check_exec(output, exit_code, stdout, stderr);
+        Ok(())
+    }
+
+    fn check_exec(test: &Arc<Mutex<ExecTest>>, exit_code: i32, stdout: &[&str], stderr: &[&str]) {
+        let output = &*test.lock().unwrap();
+        check_out("stderr", stderr, &output.stderr);
+        check_out("stdout", stdout, &output.stdout);
 
         let result = output.result.as_ref().unwrap();
         assert_eq!(exit_code, result.exit_code);
         println!("Exit comment: {}", result.exit_comment);
-
-        Ok(())
     }
 
-    fn check_out(expected: &[&str], actual: &[u8]) {
+    fn check_out(stream: &str, expected: &[&str], actual: &[u8]) {
         let actual =
             str::from_utf8(actual).map(|out| out.lines().map(str::trim).collect::<Vec<_>>());
-        assert_eq!(Ok(expected.to_vec()), actual);
+        assert_eq!(Ok(expected.to_vec()), actual, "{stream}");
     }
 
     fn exec_request(cmd: &str, bash: &str) -> ExecRequest {
@@ -784,13 +886,63 @@ mod tests {
         let minion_addr = new_socket_addr("127.0.0.2")?;
         minion.serve_tcp(&minion_addr).await?;
         let stream = &mut TcpStream::connect(minion_addr).await?;
-        exec_request("echo 123", "echo 123")
-            .to_packet()
-            .write(stream)
-            .await?;
-        let packet = Packet::read(stream).await?;
-        println!("{}", packet.as_str()?);
 
-        test_exec("echo hello\n", 0, &["hello"], &[]).await
+        let request = exec_request("echo 123", "echo 123");
+        request.to_packet().write(stream).await?;
+
+        let test = &ExecTest::new(&request.request_id);
+        while let Ok(packet) = Packet::read(stream).await {
+            match packet.ty() {
+                ExecOutput::PACKET_TYPE => test.send(ExecOutput::from_packet(&packet)?).await?,
+                ExecResult::PACKET_TYPE => test.send(ExecResult::from_packet(&packet)?).await?,
+                _ => panic!("Unknown packet type"),
+            };
+        }
+        check_exec(test, 0, &["123"], &[]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_exec_echo_legacy() -> Result<()> {
+        let minion = Minion::new("test");
+        let minion_addr = new_socket_addr("127.0.0.2")?;
+        minion
+            .serve_legacy(&minion_addr, &tls_minion_config(None))
+            .await?;
+        let stream = &mut tls_connect(minion_addr, tls_client_config(true)?).await?;
+
+        let command = b"echo 123";
+        stream.write_u32(command.len() as u32).await?;
+        stream.write_all(command).await?;
+
+        let request_id = "test".to_owned();
+        let test = &ExecTest::new(&request_id);
+        loop {
+            let ty = stream.read_u32().await?;
+            match ty {
+                LegacyTransmitter::OUTPUT => {
+                    let mut stdout = vec![0; stream.read_u32().await? as usize];
+                    stream.read_exact(&mut stdout).await?;
+                    test.send(ExecOutput {
+                        request_id: request_id.clone(),
+                        stdout,
+                        stderr: vec![],
+                    })
+                    .await?;
+                }
+                LegacyTransmitter::RESULT => {
+                    test.send(ExecResult {
+                        request_id: request_id.clone(),
+                        exit_code: stream.read_i32().await?,
+                        exit_comment: String::new(),
+                    })
+                    .await?;
+                    break;
+                }
+                _ => panic!("Unknown packet type"),
+            };
+        }
+        check_exec(test, 0, &["123"], &[]);
+        Ok(())
     }
 }

@@ -1,4 +1,4 @@
-use core::time::Duration;
+use core::{fmt::Debug, time::Duration};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str;
@@ -20,7 +20,7 @@ use tokio_rustls::{server::TlsStream, TlsAcceptor};
 // Message
 
 /// Network message
-pub trait Message: Serialize + for<'a> Deserialize<'a> + Send + Sync + 'static {
+pub trait Message: Serialize + for<'a> Deserialize<'a> + Debug + Send + Sync + 'static {
     const PACKET_TYPE: u32;
 
     /// Converts to packet containing UTF-8 encoded JSON string
@@ -52,8 +52,8 @@ pub trait Message: Serialize + for<'a> Deserialize<'a> + Send + Sync + 'static {
 
 /// Sends [`Message`]s
 #[async_trait]
-pub trait MessageTransmitter: Send + Clone + 'static {
-    async fn send<M: Message>(&mut self, message: M) -> Result<()>;
+pub trait MessageTransmitter: Send + Sync + Clone + 'static {
+    async fn send<M: Message>(&self, message: M) -> Result<()>;
 }
 
 /// Sends [`Message`]s in JSON
@@ -71,7 +71,7 @@ impl<T: Transmitter> JsonTransmitter<T> {
 
 #[async_trait]
 impl<T: Transmitter> MessageTransmitter for JsonTransmitter<T> {
-    async fn send<M: Message>(&mut self, message: M) -> Result<()> {
+    async fn send<M: Message>(&self, message: M) -> Result<()> {
         self.transmitter.send(message.to_packet()).await
     }
 }
@@ -161,6 +161,12 @@ impl Packet {
     pub fn as_str(&self) -> Result<&str> {
         str::from_utf8(&self.payload).context("Invalid UTF-8")
     }
+
+    /// Returns packet type
+    #[must_use]
+    pub fn ty(&self) -> u32 {
+        self.ty
+    }
 }
 
 //
@@ -175,12 +181,12 @@ pub trait Receiver<T: Transmitter>: Send + 'static {
 /// Sends [`Packet`]s
 #[async_trait]
 pub trait Transmitter: Send + Sync + Unpin + Clone + 'static {
-    async fn send(&mut self, packet: Packet) -> Result<()>;
+    async fn send(&self, packet: Packet) -> Result<()>;
 }
 
 #[async_trait]
 impl<T: AsyncWrite + Send + Unpin + 'static> Transmitter for Arc<Mutex<T>> {
-    async fn send(&mut self, packet: Packet) -> Result<()> {
+    async fn send(&self, packet: Packet) -> Result<()> {
         packet.write(&mut *self.lock().await).await
     }
 }
@@ -204,7 +210,7 @@ impl UdpStream {
 
 #[async_trait]
 impl Transmitter for UdpStream {
-    async fn send(&mut self, packet: Packet) -> Result<()> {
+    async fn send(&self, packet: Packet) -> Result<()> {
         packet.send(&self.socket, &self.address).await
     }
 }
@@ -260,17 +266,15 @@ impl TcpReceiver {
 #[async_trait]
 impl Receiver<Arc<Mutex<TcpStream>>> for TcpReceiver {
     async fn receive(&mut self) -> Result<(Packet, Arc<Mutex<TcpStream>>)> {
-        match self.listener.accept().await.context("accept") {
-            Ok((mut stream, _)) => Ok((
-                Packet::read(&mut stream).await?,
-                Arc::new(Mutex::new(stream)),
-            )),
-            // Self::spawn(
-            //     "TCP connection",
-            //     async move { this.communicate(stream).await },
-            // );
-            Err(error) => Err(error),
-        }
+        // Self::spawn(
+        //     "TCP connection",
+        //     async move { this.communicate(stream).await },
+        // );
+        let (mut stream, _addr) = self.listener.accept().await.context("accept")?;
+        Ok((
+            Packet::read(&mut stream).await?,
+            Arc::new(Mutex::new(stream)),
+        ))
     }
 }
 
@@ -279,42 +283,36 @@ impl Receiver<Arc<Mutex<TcpStream>>> for TcpReceiver {
 
 /// Authentication pair: key and certificate chain
 #[must_use]
-pub struct TlsAuth<'a> {
-    key: &'a Path,
-    certificates: &'a Path,
+pub struct TlsAuth {
+    key: PathBuf,
+    certificates: PathBuf,
 }
 
-impl<'a> TlsAuth<'a> {
-    pub fn new(key: &'a PathBuf, certificates: &'a PathBuf) -> Self {
-        Self { key, certificates }
+impl TlsAuth {
+    pub fn new(key: &Path, certificates: &Path) -> Self {
+        Self {
+            key: key.to_owned(),
+            certificates: certificates.to_owned(),
+        }
     }
-}
 
-impl<'a> TlsAuth<'a> {
     fn load_key(&self) -> Result<PrivateKey> {
-        TlsUtil::load_key(self.key)
+        TlsUtil::load_key(&self.key)
     }
 }
 
 /// TLS server configuration
 #[must_use]
-pub struct TlsServerConfig<'a> {
-    server_auth: TlsAuth<'a>,
-    client_certificates: Option<&'a Path>,
+pub struct TlsServerConfig {
+    server_auth: TlsAuth,
+    client_certificates: Option<PathBuf>,
 }
 
-impl<'a> TlsServerConfig<'a> {
-    pub fn new(
-        server_key: &'a Path,
-        server_certificates: &'a Path,
-        client_auth: Option<&'a Path>,
-    ) -> Self {
+impl TlsServerConfig {
+    pub fn new(server_key: &Path, server_certificates: &Path, client_auth: Option<&Path>) -> Self {
         TlsServerConfig {
-            server_auth: TlsAuth {
-                key: server_key,
-                certificates: server_certificates,
-            },
-            client_certificates: client_auth,
+            server_auth: TlsAuth::new(server_key, server_certificates),
+            client_certificates: client_auth.map(Path::to_owned),
         }
     }
 
@@ -323,11 +321,11 @@ impl<'a> TlsServerConfig<'a> {
     }
 
     fn config(&self) -> Result<ServerConfig> {
-        let certificates = TlsUtil::load_certificates(self.server_auth.certificates)?;
+        let certificates = TlsUtil::load_certificates(&self.server_auth.certificates)?;
         let key = self.server_auth.load_key()?;
         ServerConfig::builder()
             .with_safe_defaults()
-            .with_client_cert_verifier(match self.client_certificates {
+            .with_client_cert_verifier(match self.client_certificates.as_ref() {
                 None => Ok(NoClientAuth::boxed()) as Result<_>,
                 Some(path) => {
                     Ok(AllowAnyAuthenticatedClient::new(TlsUtil::load_root_cert(path)?).boxed())
@@ -340,21 +338,19 @@ impl<'a> TlsServerConfig<'a> {
 
 /// TLS client configuration
 #[must_use]
-pub struct TlsClientConfig<'a> {
-    server_certificates: &'a Path,
-    client_auth: Option<TlsAuth<'a>>,
+pub struct TlsClientConfig {
+    server_certificates: PathBuf,
+    client_auth: Option<TlsAuth>,
 }
 
-impl<'a> TlsClientConfig<'a> {
-    pub fn new(server_certificates: &'a PathBuf, client_auth: Option<TlsAuth<'a>>) -> Self {
+impl TlsClientConfig {
+    pub fn new(server_certificates: &Path, client_auth: Option<TlsAuth>) -> Self {
         Self {
-            server_certificates,
+            server_certificates: server_certificates.to_owned(),
             client_auth,
         }
     }
-}
 
-impl<'a> TlsClientConfig<'a> {
     /// Build [`ClientConfig`]
     ///
     /// # Errors
@@ -363,12 +359,12 @@ impl<'a> TlsClientConfig<'a> {
     pub fn config(&self) -> Result<ClientConfig> {
         let builder = ClientConfig::builder()
             .with_safe_defaults()
-            .with_root_certificates(TlsUtil::load_root_cert(self.server_certificates)?);
+            .with_root_certificates(TlsUtil::load_root_cert(&self.server_certificates)?);
         match self.client_auth {
             None => Ok(builder.with_no_client_auth()),
             Some(ref auth) => builder
                 .with_single_cert(
-                    TlsUtil::load_certificates(auth.certificates)?,
+                    TlsUtil::load_certificates(&auth.certificates)?,
                     auth.load_key()?,
                 )
                 .context("Client auth"),
@@ -412,12 +408,48 @@ impl TlsUtil {
     }
 }
 
-/// Receives [`Packet`]s over TLS
-
-#[must_use]
-pub struct TlsReceiver {
+pub struct TlsListener {
     acceptor: TlsAcceptor,
     listener: TcpListener,
+}
+
+impl TlsListener {
+    /// Creates a new TLS listener
+    ///
+    /// # Errors
+    /// Error error if
+    /// - `config` is invalid
+    /// - cannot bind to specified `socket_address`
+    pub async fn new(socket_address: &SocketAddr, config: &TlsServerConfig) -> Result<Self> {
+        Ok(Self {
+            acceptor: config.acceptor()?,
+            listener: TcpListener::bind(&socket_address).await?,
+        })
+    }
+
+    /// Accepts a new TLS connection
+    ///
+    /// # Errors
+    /// Error error if
+    /// - `config` is invalid
+    /// - cannot bind to specified `socket_address`
+    pub async fn accept(&mut self) -> Result<(TlsTransmitter, SocketAddr)> {
+        let (tcp_stream, addr) = self.listener.accept().await.context("accept")?;
+        // Self::spawn(
+        //     "TLS connection",
+        //     async move { this.communicate(stream).await },
+        // );
+        let transmitter = TlsTransmitter {
+            stream: Some(self.acceptor.accept(tcp_stream).await?),
+        };
+        Ok((transmitter, addr))
+    }
+}
+
+/// Receives [`Packet`]s over TLS
+#[must_use]
+pub struct TlsReceiver {
+    listener: TlsListener,
 }
 
 impl TlsReceiver {
@@ -427,23 +459,36 @@ impl TlsReceiver {
     /// Error error if
     /// - `config` is invalid
     /// - cannot bind to specified `socket_address`
-    pub async fn new(socket_address: &SocketAddr, config: &TlsServerConfig<'_>) -> Result<Self> {
+    pub async fn new(socket_address: &SocketAddr, config: &TlsServerConfig) -> Result<Self> {
         Ok(Self {
-            acceptor: config.acceptor()?,
-            listener: TcpListener::bind(&socket_address).await?,
+            listener: TlsListener::new(socket_address, config).await?,
         })
     }
 }
 
-#[derive(Clone)]
+#[async_trait]
+impl Receiver<Arc<Mutex<TlsTransmitter>>> for TlsReceiver {
+    async fn receive(&mut self) -> Result<(Packet, Arc<Mutex<TlsTransmitter>>)> {
+        let (mut transmitter, _addr) = self.listener.accept().await?;
+        let packet = Packet::read(transmitter.stream()).await?;
+        Ok((packet, Arc::new(Mutex::new(transmitter))))
+    }
+}
+
 pub struct TlsTransmitter {
-    stream: Arc<Mutex<TlsStream<TcpStream>>>,
+    stream: Option<TlsStream<TcpStream>>,
+}
+
+impl TlsTransmitter {
+    pub fn stream(&mut self) -> &mut TlsStream<TcpStream> {
+        self.stream.as_mut().expect("not drop")
+    }
 }
 
 #[async_trait]
-impl Transmitter for TlsTransmitter {
-    async fn send(&mut self, packet: Packet) -> Result<()> {
-        packet.write(&mut *self.stream.lock().await).await
+impl Transmitter for Arc<Mutex<TlsTransmitter>> {
+    async fn send(&self, packet: Packet) -> Result<()> {
+        packet.write(self.lock().await.stream()).await
     }
 }
 
@@ -451,36 +496,12 @@ impl Drop for TlsTransmitter {
     fn drop(&mut self) {
         const JAVA_SLEEP: Duration = Duration::from_millis(1);
 
-        let stream = Arc::clone(&self.stream);
+        let mut stream = self.stream.take().expect("not drop");
         tokio::spawn(async move {
-            let stream = &mut *stream.lock().await;
             stream.shutdown().await.expect("shutdown socket");
 
             // Java TLS compatibility
             sleep(JAVA_SLEEP).await;
         });
-    }
-}
-
-#[async_trait]
-impl Receiver<TlsTransmitter> for TlsReceiver {
-    async fn receive(&mut self) -> Result<(Packet, TlsTransmitter)> {
-        match self.listener.accept().await.context("accept") {
-            Ok((tcp_stream, _)) => {
-                let acceptor = self.acceptor.clone();
-                let mut tls_stream: TlsStream<TcpStream> = acceptor.accept(tcp_stream).await?;
-                Ok((
-                    Packet::read(&mut tls_stream).await?,
-                    TlsTransmitter {
-                        stream: Arc::new(Mutex::new(tls_stream)),
-                    },
-                ))
-            }
-            // Self::spawn(
-            //     "TLS connection",
-            //     async move { this.communicate(stream).await },
-            // );
-            Err(error) => Err(error),
-        }
     }
 }

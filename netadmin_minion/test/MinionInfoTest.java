@@ -1,21 +1,19 @@
 import javax.net.ssl.*;
 import java.io.DataInputStream;
-import java.io.DataOutput;
 import java.io.DataOutputStream;
 import java.io.FileInputStream;
-import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 
 /**
  * @author Georgiy Korneev (kgeorgiy@kgeorgiy.info)
  */
-public final class TestMinion {
-    private TestMinion() {
+public final class MinionInfoTest {
+    private MinionInfoTest() {
     }
 
     public static void main(final String[] args) throws Exception {
-        System.out.println("Version: " + System.getProperty("java.version"));
+        System.out.println("Java version: " + System.getProperty("java.version"));
 
         final char[] password = "vc/iIcg1R/Zbuf55a/Yu7d35EvCX7rNPYgarD5KK8UAlzh7KZRYz5LQ1wxmSo8IZ36X7kytSrHQ6".toCharArray();
         final KeyStore jks = KeyStore.getInstance("JKS");
