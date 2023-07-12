@@ -9,7 +9,7 @@ use netadmin_minion::{net::TlsServerConfig, Minion};
 #[tokio::main]
 #[allow(clippy::unwrap_used)]
 async fn main() -> Result<()> {
-    let minion = Minion::new("test_minion".to_owned());
+    let minion = Minion::new("test_minion");
     let handle = minion
         .serve_tls(
             &SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 6236),

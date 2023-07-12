@@ -4,21 +4,21 @@ use std::str;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
 use bytes::{Buf, BufMut};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::sync::Mutex;
 use tokio_rustls::rustls::server::{AllowAnyAuthenticatedClient, NoClientAuth};
 use tokio_rustls::rustls::{Certificate, ClientConfig, PrivateKey, RootCertStore, ServerConfig};
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
-
-use async_trait::async_trait;
 
 //
 // Message
 
 /// Network message
-pub trait Message: Serialize + for<'a> Deserialize<'a> + Send + Sync {
+pub trait Message: Serialize + for<'a> Deserialize<'a> + Send + Sync + 'static {
     const PACKET_TYPE: u32;
 
     /// Converts to packet containing UTF-8 encoded JSON string
@@ -50,12 +50,13 @@ pub trait Message: Serialize + for<'a> Deserialize<'a> + Send + Sync {
 
 /// Sends [`Message`]s
 #[async_trait]
-pub trait MessageTransmitter {
+pub trait MessageTransmitter: Send + Clone + 'static {
     async fn send<M: Message>(&mut self, message: M) -> Result<()>;
 }
 
 /// Sends [`Message`]s in JSON
 #[must_use]
+#[derive(Clone)]
 pub struct JsonTransmitter<T: Transmitter> {
     transmitter: T,
 }
@@ -67,7 +68,7 @@ impl<T: Transmitter> JsonTransmitter<T> {
 }
 
 #[async_trait]
-impl<T: Transmitter + Send + Sync> MessageTransmitter for JsonTransmitter<T> {
+impl<T: Transmitter> MessageTransmitter for JsonTransmitter<T> {
     async fn send<M: Message>(&mut self, message: M) -> Result<()> {
         self.transmitter.send(message.to_packet()).await
     }
@@ -151,11 +152,11 @@ impl Packet {
         Ok(())
     }
 
-    /// Interprets payload as UTF-8 encoded JSON string
+    /// Interprets payload as UTF-8 encoded string
     //
     /// # Errors
     /// - input is not valid UTF-8 string
-    fn as_str(&self) -> Result<&str> {
+    pub fn as_str(&self) -> Result<&str> {
         str::from_utf8(&self.payload).context("Invalid UTF-8")
     }
 }
@@ -165,20 +166,20 @@ impl Packet {
 
 /// Receives [`Packet`]s
 #[async_trait]
-pub trait Receiver<T: Transmitter> {
+pub trait Receiver<T: Transmitter>: Send + 'static {
     async fn receive(&mut self) -> Result<(Packet, T)>;
 }
 
 /// Sends [`Packet`]s
 #[async_trait]
-pub trait Transmitter {
+pub trait Transmitter: Send + Sync + Unpin + Clone + 'static {
     async fn send(&mut self, packet: Packet) -> Result<()>;
 }
 
 #[async_trait]
-impl<T: AsyncWrite + Send + Unpin> Transmitter for T {
+impl<T: AsyncWrite + Send + Unpin + 'static> Transmitter for Arc<Mutex<T>> {
     async fn send(&mut self, packet: Packet) -> Result<()> {
-        packet.write(self).await
+        packet.write(&mut *self.lock().await).await
     }
 }
 
@@ -186,6 +187,7 @@ impl<T: AsyncWrite + Send + Unpin> Transmitter for T {
 // UdpStream, UdpReceiver
 
 /// UDP pseudo-stream
+#[derive(Clone)]
 #[must_use]
 pub struct UdpStream {
     socket: Arc<UdpSocket>,
@@ -254,10 +256,13 @@ impl TcpReceiver {
 }
 
 #[async_trait]
-impl Receiver<TcpStream> for TcpReceiver {
-    async fn receive(&mut self) -> Result<(Packet, TcpStream)> {
+impl Receiver<Arc<Mutex<TcpStream>>> for TcpReceiver {
+    async fn receive(&mut self) -> Result<(Packet, Arc<Mutex<TcpStream>>)> {
         match self.listener.accept().await.context("accept") {
-            Ok((mut stream, _)) => Ok((Packet::read(&mut stream).await?, stream)),
+            Ok((mut stream, _)) => Ok((
+                Packet::read(&mut stream).await?,
+                Arc::new(Mutex::new(stream)),
+            )),
             // Self::spawn(
             //     "TCP connection",
             //     async move { this.communicate(stream).await },
@@ -429,13 +434,16 @@ impl TlsReceiver {
 }
 
 #[async_trait]
-impl Receiver<TlsStream<TcpStream>> for TlsReceiver {
-    async fn receive(&mut self) -> Result<(Packet, TlsStream<TcpStream>)> {
+impl Receiver<Arc<Mutex<TlsStream<TcpStream>>>> for TlsReceiver {
+    async fn receive(&mut self) -> Result<(Packet, Arc<Mutex<TlsStream<TcpStream>>>)> {
         match self.listener.accept().await.context("accept") {
             Ok((tcp_stream, _)) => {
                 let acceptor = self.acceptor.clone();
                 let mut tls_stream: TlsStream<TcpStream> = acceptor.accept(tcp_stream).await?;
-                Ok((Packet::read(&mut tls_stream).await?, tls_stream))
+                Ok((
+                    Packet::read(&mut tls_stream).await?,
+                    Arc::new(Mutex::new(tls_stream)),
+                ))
             }
             // Self::spawn(
             //     "TLS connection",
