@@ -197,7 +197,7 @@ impl Minion {
 }
 
 #[cfg(test)]
-#[allow(clippy::print_stdout)]
+#[allow(clippy::print_stdout, clippy::use_debug, clippy::std_instead_of_core)]
 mod tests {
     use std::future::Future;
     use std::net::{IpAddr, SocketAddr};
@@ -206,6 +206,7 @@ mod tests {
     use std::str;
     use std::str::FromStr;
     use std::sync::atomic::{AtomicU16, Ordering};
+    use tokio::io::{AsyncRead, AsyncWrite};
 
     use tokio::net::{TcpStream, UdpSocket};
     use tokio_rustls::rustls::ServerName;
@@ -213,7 +214,7 @@ mod tests {
 
     use net::Message;
 
-    use crate::net::{TlsAuth, TlsClientConfig, TlsServerConfig};
+    use crate::net::{Packet, TlsAuth, TlsClientConfig, TlsServerConfig};
 
     use super::*;
 
@@ -230,7 +231,7 @@ mod tests {
         let request = InfoRequest::new("123".to_owned());
         let response = request.response(&minion);
 
-        check_response(minion_id, &request, &response);
+        check_response(&minion_id, &request, &response);
     }
 
     #[test]
@@ -239,15 +240,15 @@ mod tests {
         let minion = Minion::new(minion_id.clone());
         let request = InfoRequest::new("123".to_owned());
 
-        let serialized = serde_json::to_string(&request.response(&minion)).unwrap();
-        println!("serialized = {}", serialized);
-        let response = serde_json::from_str(&serialized).unwrap();
-        println!("deserialized = {:?}", response);
+        let serialized = serde_json::to_string(&request.response(&minion)).expect("always succeed");
+        println!("serialized = {serialized}");
+        let response = serde_json::from_str(&serialized).expect("valid JSON");
+        println!("deserialized = {response:?}");
 
-        check_response(minion_id, &request, &response);
+        check_response(&minion_id, &request, &response);
     }
 
-    fn check_response(minion_name: String, request: &InfoRequest, response: &InfoResponse) {
+    fn check_response(minion_name: &str, request: &InfoRequest, response: &InfoResponse) {
         assert_eq!(minion_name, response.minion_id);
         assert_eq!(request.request_id, response.request_id);
     }
@@ -264,7 +265,8 @@ mod tests {
 
     async fn test_udp(host: &str, local: &str) -> Result<()> {
         let local = local.to_owned();
-        let server_address = SocketAddr::new(IpAddr::from_str(host).unwrap(), port());
+        let host = IpAddr::from_str(host).expect("valid address");
+        let server_address = SocketAddr::new(host, port());
         parallel_requests(
             move |minion| async move { minion.serve_udp(&server_address).await },
             move |id, request| {
@@ -275,7 +277,7 @@ mod tests {
 
                     println!("UDP request {id} sent to {server_address}");
 
-                    let (packet, addr) = Packet::receive(&socket).await?;
+                    let (packet, addr) = Box::pin(Packet::receive(&socket)).await?;
                     assert_eq!(server_address, addr);
                     Ok(packet)
                 }
@@ -325,7 +327,7 @@ mod tests {
                 let response = communicate(id.clone(), request.to_packet()).await?;
                 let response = InfoResponse::from_packet(&response)?;
 
-                check_response(minion_id, &request, &response);
+                check_response(&minion_id, &request, &response);
                 println!("Request {id} OK");
                 Ok(())
             }
@@ -334,9 +336,9 @@ mod tests {
         Ok(())
     }
 
-    type PBFR<T> = Pin<Box<dyn Future<Output = Result<T>>>>;
+    type Pbfr<T> = Pin<Box<dyn Future<Output = Result<T>>>>;
 
-    fn parallel<T, F, FR>(n: usize, f: F) -> PBFR<Vec<T>>
+    fn parallel<T, F, FR>(n: usize, f: F) -> Pbfr<Vec<T>>
     where
         T: 'static,
         F: FnMut(usize) -> FR,
@@ -346,16 +348,16 @@ mod tests {
             Box::pin(async { Ok(vec![]) as Result<Vec<T>> }),
             |prev, next| {
                 Box::pin(async {
-                    tokio::try_join!(prev, next).map(|(mut p, n)| {
-                        p.push(n);
-                        p
+                    tokio::try_join!(prev, next).map(|(mut results, result)| {
+                        results.push(result);
+                        results
                     })
                 })
             },
         )
     }
 
-    const KEYS_DIR: &'static str = "resources/test";
+    const KEYS_DIR: &str = "resources/test";
 
     fn tls_path(domain: &str, ext: &str) -> PathBuf {
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -381,7 +383,7 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "CertificateRequired")]
     async fn test_tls_missing_auth() {
-        test_tls("127.0.0.2", Some(()), false).await.expect("panic")
+        test_tls("127.0.0.2", Some(()), false).await.expect("panic");
     }
 
     async fn test_tls(host: &str, minion_auth: Option<()>, client_auth: bool) -> Result<()> {
@@ -392,11 +394,7 @@ mod tests {
         let client_key = &tls_path(Minion::CLIENT_DOMAIN, "key");
         let config = TlsClientConfig::new(
             server_certificate,
-            if client_auth {
-                Some(TlsAuth::new(client_key, client_certificate))
-            } else {
-                None
-            },
+            client_auth.then(|| TlsAuth::new(client_key, client_certificate)),
         );
         let config = Arc::new(config.config()?);
 
@@ -410,7 +408,7 @@ mod tests {
                         &TlsServerConfig::new(
                             &tls_path(Minion::MINION_DOMAIN, "key"),
                             &tls_path(Minion::MINION_DOMAIN, "crt"),
-                            client_certificates_file.as_ref().map(PathBuf::as_path),
+                            client_certificates_file.as_deref(),
                         ),
                     )
                     .await
@@ -439,6 +437,6 @@ mod tests {
     ) -> Result<Packet> {
         packet.write(stream).await?;
         println!("{ty} request {id} sent to {server_address}");
-        Ok(Packet::read(stream).await?)
+        Packet::read(stream).await
     }
 }
