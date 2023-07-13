@@ -299,6 +299,10 @@ impl TlsAuth {
     fn load_key(&self) -> Result<PrivateKey> {
         TlsUtil::load_key(&self.key)
     }
+
+    fn load_certificates(&self) -> Result<Vec<Certificate>> {
+        TlsUtil::load_certificates(&self.certificates)
+    }
 }
 
 /// TLS server configuration
@@ -321,8 +325,7 @@ impl TlsServerConfig {
     }
 
     fn config(&self) -> Result<ServerConfig> {
-        let certificates = TlsUtil::load_certificates(&self.server_auth.certificates)?;
-        let key = self.server_auth.load_key()?;
+        let auth = &self.server_auth;
         ServerConfig::builder()
             .with_safe_defaults()
             .with_client_cert_verifier(match self.client_certificates.as_ref() {
@@ -331,7 +334,7 @@ impl TlsServerConfig {
                     Ok(AllowAnyAuthenticatedClient::new(TlsUtil::load_root_cert(path)?).boxed())
                 }
             }?)
-            .with_single_cert(certificates, key)
+            .with_single_cert(auth.load_certificates()?, auth.load_key()?)
             .context("Invalid private key")
     }
 }
@@ -363,10 +366,7 @@ impl TlsClientConfig {
         match self.client_auth {
             None => Ok(builder.with_no_client_auth()),
             Some(ref auth) => builder
-                .with_single_cert(
-                    TlsUtil::load_certificates(&auth.certificates)?,
-                    auth.load_key()?,
-                )
+                .with_client_auth_cert(auth.load_certificates()?, auth.load_key()?)
                 .context("Client auth"),
         }
     }
