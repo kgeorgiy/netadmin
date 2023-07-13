@@ -282,33 +282,43 @@ impl Receiver<Arc<Mutex<TcpStream>>> for TcpReceiver {
 // TlsAuth, TlsServiceConfig, TlsClientConfig, TlsReceiver
 
 /// Authentication pair: key and certificate chain
+#[derive(Debug, Serialize, Deserialize)]
 #[must_use]
 pub struct TlsAuth {
-    key: PathBuf,
-    certificates: PathBuf,
+    #[serde(alias = "private-key")]
+    private_key: PathBuf,
+    certificate: PathBuf,
 }
 
 impl TlsAuth {
-    pub fn new(key: &Path, certificates: &Path) -> Self {
+    pub fn new(key: &Path, certificate: &Path) -> Self {
         Self {
-            key: key.to_owned(),
-            certificates: certificates.to_owned(),
+            private_key: key.to_owned(),
+            certificate: certificate.to_owned(),
         }
     }
 
     fn load_key(&self) -> Result<PrivateKey> {
-        TlsUtil::load_key(&self.key)
+        TlsUtil::load_key(&self.private_key)
     }
 
     fn load_certificates(&self) -> Result<Vec<Certificate>> {
-        TlsUtil::load_certificates(&self.certificates)
+        TlsUtil::load_certificates(&self.certificate)
+    }
+
+    pub fn resolve_paths(&mut self, base: &Path) {
+        self.private_key = base.join(&self.private_key);
+        self.certificate = base.join(&self.certificate);
     }
 }
 
 /// TLS server configuration
+#[derive(Debug, Serialize, Deserialize)]
 #[must_use]
 pub struct TlsServerConfig {
+    #[serde(flatten)]
     server_auth: TlsAuth,
+    #[serde(alias = "client-auth")]
     client_certificates: Option<PathBuf>,
 }
 
@@ -336,6 +346,13 @@ impl TlsServerConfig {
             }?)
             .with_single_cert(auth.load_certificates()?, auth.load_key()?)
             .context("Invalid private key")
+    }
+
+    pub fn resolve_paths(&mut self, base: &Path) {
+        self.server_auth.resolve_paths(base);
+        self.client_certificates
+            .iter_mut()
+            .for_each(|path| *path = base.join(&path));
     }
 }
 

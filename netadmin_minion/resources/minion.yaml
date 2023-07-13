@@ -1,0 +1,41 @@
+# Supported protocols
+# - udp
+# - tcp
+# - tls (over tcp)
+# - legacy (tls over tcp, 'exec' service only)
+#
+#  Supported services
+# - info (basic minion information)
+# - exec (remote command execution, should be provided only on secure connections with client authentication)
+id: test-minion
+serve:
+  udp:
+    - bind:
+        - "0.0.0.0:6236"
+        - "[::]:6236"
+      services: [info]
+  #
+  #tcp:
+  #  - bind:
+  #      - "0.0.0.0:6236"
+  #      - "[::]:6236"
+  #    services: [info]
+
+  tls:
+    - bind:
+        - "0.0.0.0:6236"
+        - "[::]:6236"
+      services: [info, exec]
+      private-key: minion.key
+      certificate: minion.crt
+      # Optional, disables client authentication on removal
+      client-auth: client.crt
+
+  legacy:
+    - bind:
+        - "0.0.0.0:12345"
+        - "[::]:12345"
+      services: [info, exec]
+      private-key: minion.key
+      certificate: minion.crt
+      client-auth: client.crt   # Optional. Removal disables client authentication

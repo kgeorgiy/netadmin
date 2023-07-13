@@ -1,29 +1,40 @@
-use core::str::FromStr;
-use std::net::SocketAddr;
+use std::fs::File;
 use std::path::Path;
+use std::process::ExitCode;
 
-use anyhow::Result;
-use tokio::join;
+use anyhow::{Context, Result};
 
-use netadmin_minion::{net::TlsServerConfig, Minion};
+use netadmin_minion::{Minion, MinionConfig};
 
 #[tokio::main]
-#[allow(clippy::unwrap_used)]
-async fn main() -> Result<()> {
-    let minion = Minion::new("test_minion");
-    let tls_config = &TlsServerConfig::new(
-        Path::new("__keys/minion.netadmin.test.key"),
-        Path::new("__keys/minion.netadmin.test.crt"),
-        Some(Path::new("__keys/client.netadmin.test.crt")),
-    );
+#[allow(clippy::unwrap_used, clippy::print_stderr)]
+async fn main() -> ExitCode {
+    let config = Path::new("resources/minion.yaml");
 
-    let _handles = join!(
-        minion
-            .serve_tls(&SocketAddr::from_str("0.0.0.0:6236").unwrap(), tls_config)
-            .await?,
-        minion
-            .serve_legacy(&SocketAddr::from_str("0.0.0.0:12345").unwrap(), tls_config)
-            .await?,
-    );
+    match run(config).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let causes: String = error
+                .chain()
+                .skip(1)
+                .map(|err| format!("\n    Caused by: {err}"))
+                .collect();
+            eprintln!("Minion error: {error}{causes}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(config_path: &Path) -> Result<()> {
+    let mut config: MinionConfig = {
+        let config_file = File::open(config_path).context("Failed to open config file")?;
+        serde_yaml::from_reader(&config_file).context("Failed to parse config file")?
+    };
+    config.resolve_paths(config_path.parent().expect("Has parent path"));
+
+    let handles = Minion::create_and_serve(&config).await?;
+    for handle in handles {
+        handle.await?;
+    }
     Ok(())
 }

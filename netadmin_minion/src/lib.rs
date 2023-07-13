@@ -1,4 +1,5 @@
 use core::{fmt::Debug, future::Future, mem, pin::Pin};
+use std::path::Path;
 use std::{env, net::SocketAddr, str, sync::Arc};
 
 use anyhow::{anyhow, Context, Error, Result};
@@ -27,14 +28,32 @@ trait RequestHandler {
     async fn handle<T: MessageTransmitter>(self, minion: Arc<Minion>, transmitter: T)
         -> Result<()>;
 
-    fn handler<T: MessageTransmitter>(packet: &Packet) -> Result<Handler<T>>
+    fn handler<T: MessageTransmitter>(packet: &Packet) -> Option<Handler<T>>
     where
         Self: Message,
     {
-        let request = Self::from_packet(packet)?;
-        Ok(Box::new(|minion, transmitter| {
+        let request = Self::from_packet(packet).ok()?;
+        Some(Box::new(|minion, transmitter| {
             request.handle(minion, transmitter)
         }))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum Service {
+    #[serde(alias = "info")]
+    Info,
+    #[serde(alias = "exec")]
+    Exec,
+}
+
+impl Service {
+    fn handler<T: MessageTransmitter>(&self) -> fn(&Packet) -> Option<Handler<T>> {
+        match *self {
+            Service::Info => InfoRequest::handler,
+            Service::Exec => ExecRequest::handler,
+        }
     }
 }
 
@@ -332,8 +351,9 @@ impl Minion {
     pub async fn serve_udp(
         self: &Arc<Self>,
         socket_address: &SocketAddr,
+        services: &[Service],
     ) -> Result<JoinHandle<()>> {
-        Ok(self.serve("UDP", UdpReceiver::new(socket_address).await?))
+        Ok(self.serve_proto("UDP", services, UdpReceiver::new(socket_address).await?))
     }
 
     /// Serves minion information on TCP port
@@ -343,8 +363,9 @@ impl Minion {
     pub async fn serve_tcp(
         self: &Arc<Self>,
         socket_address: &SocketAddr,
+        services: &[Service],
     ) -> Result<JoinHandle<()>> {
-        Ok(self.serve("TCP", TcpReceiver::new(socket_address).await?))
+        Ok(self.serve_proto("TCP", services, TcpReceiver::new(socket_address).await?))
     }
 
     /// Serves full minion
@@ -357,8 +378,13 @@ impl Minion {
         self: &Arc<Self>,
         socket_address: &SocketAddr,
         config: &TlsServerConfig,
+        services: &[Service],
     ) -> Result<JoinHandle<()>> {
-        Ok(self.serve("TLS", TlsReceiver::new(socket_address, config).await?))
+        Ok(self.serve_proto(
+            "TLS",
+            services,
+            TlsReceiver::new(socket_address, config).await?,
+        ))
     }
 
     /// Serves legacy (Scala) compatible minion
@@ -371,16 +397,26 @@ impl Minion {
         self: &Arc<Self>,
         socket_address: &SocketAddr,
         config: &TlsServerConfig,
+        services: &[Service],
     ) -> Result<JoinHandle<()>> {
-        Ok(self.serve("Legacy", LegacyReceiver::new(socket_address, config).await?))
+        Ok(self.serve_proto(
+            "Legacy",
+            services,
+            LegacyReceiver::new(socket_address, config).await?,
+        ))
     }
 
-    fn serve<T, R>(self: &Arc<Self>, protocol: &str, mut receiver: R) -> JoinHandle<()>
+    fn serve_proto<T, R>(
+        self: &Arc<Self>,
+        protocol: &str,
+        services: &[Service],
+        mut receiver: R,
+    ) -> JoinHandle<()>
     where
         T: Transmitter,
         R: Receiver<T>,
     {
-        let handlers = vec![InfoRequest::handler, ExecRequest::handler];
+        let handlers = services.iter().map(Service::handler).collect::<Vec<_>>();
 
         let protocol = protocol.to_owned();
         let this = Arc::clone(self);
@@ -392,7 +428,7 @@ impl Minion {
                         let handlers = handlers.clone();
                         Self::spawn(&format!("{protocol} connection"), async move {
                             for handler in &handlers {
-                                if let Ok(request) = handler(&packet) {
+                                if let Some(request) = handler(&packet) {
                                     return request(this, JsonTransmitter::new(transmitter)).await;
                                 }
                             }
@@ -434,7 +470,106 @@ impl Minion {
             .collect();
         eprintln!("{context}: Error {error}{causes}");
     }
+
+    /// Creates minion that serves specified ports and protocols
+    ///
+    /// # Errors
+    /// - Duplicate ports
+    /// - Invalid TLS keys or certificates
+    pub async fn create_and_serve(config: &MinionConfig) -> Result<Vec<JoinHandle<()>>> {
+        Minion::new(&config.id).serve(&config.serve).await
+    }
+
+    /// Serves specified ports and protocols
+    ///
+    /// # Errors
+    /// - Duplicate ports
+    /// - Invalid TLS keys or certificates
+    pub async fn serve(self: &Arc<Minion>, config: &ServeConfig) -> Result<Vec<JoinHandle<()>>> {
+        let mut handles = vec![];
+        for udp in config.udp.iter().flatten() {
+            for addr in &udp.bind {
+                handles.push(self.serve_udp(addr, &udp.services).await?);
+            }
+        }
+        for tcp in config.tcp.iter().flatten() {
+            for addr in &tcp.bind {
+                handles.push(self.serve_tcp(addr, &tcp.services).await?);
+            }
+        }
+        for tls in config.tls.iter().flatten() {
+            for addr in &tls.bind.bind {
+                handles.push(self.serve_tls(addr, &tls.tls, &tls.bind.services).await?);
+            }
+        }
+        for legacy in config.legacy.iter().flatten() {
+            let services = &legacy.bind.services;
+            for addr in &legacy.bind.bind {
+                handles.push(self.serve_legacy(addr, &legacy.tls, services).await?);
+            }
+        }
+        Ok(handles)
+    }
 }
+
+//
+// *Config
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BindConfig {
+    bind: Vec<SocketAddr>,
+    services: Vec<Service>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TlsConfig {
+    #[serde(flatten)]
+    bind: BindConfig,
+    #[serde(flatten)]
+    tls: TlsServerConfig,
+}
+
+impl TlsConfig {
+    pub fn resolve_paths(&mut self, base: &Path) {
+        self.tls.resolve_paths(base);
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ServeConfig {
+    tcp: Option<Vec<BindConfig>>,
+    udp: Option<Vec<BindConfig>>,
+    tls: Option<Vec<TlsConfig>>,
+    legacy: Option<Vec<TlsConfig>>,
+}
+
+impl ServeConfig {
+    pub fn resolve_paths(&mut self, base: &Path) {
+        Self::resolve(base, &mut self.tls);
+        Self::resolve(base, &mut self.legacy);
+    }
+
+    fn resolve(base: &Path, opt_configs: &mut Option<Vec<TlsConfig>>) {
+        opt_configs
+            .iter_mut()
+            .for_each(|configs| configs.iter_mut().for_each(|c| c.resolve_paths(base)));
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MinionConfig {
+    id: String,
+    serve: ServeConfig,
+}
+
+impl MinionConfig {
+    pub fn resolve_paths(&mut self, base: &Path) {
+        self.serve.resolve_paths(base);
+    }
+}
+
+//
+// Tests
 
 #[cfg(test)]
 #[allow(
@@ -518,22 +653,26 @@ mod tests {
         let local = local.to_owned();
         let server_address = new_socket_addr(host)?;
         parallel_requests(
-            move |minion| async move { minion.serve_udp(&server_address).await },
-            move |id, request| {
-                let local = local.clone();
-                async move {
-                    let socket = UdpSocket::bind(format!("{local}:0")).await?;
-                    request.send(&socket, &server_address).await?;
-
-                    println!("UDP request {id} sent to {server_address}");
-
-                    let (packet, addr) = Box::pin(Packet::receive(&socket)).await?;
-                    assert_eq!(server_address, addr);
-                    Ok(packet)
-                }
-            },
+            move |minion| async move { minion.serve_udp(&server_address, &[Service::Info]).await },
+            move |id, request| test_packet_udp(id, server_address, local.clone(), request),
         )
         .await
+    }
+
+    async fn test_packet_udp(
+        id: String,
+        server_address: SocketAddr,
+        client_addr: String,
+        request: Packet,
+    ) -> Result<Packet, Error> {
+        let socket = UdpSocket::bind(format!("{client_addr}:0")).await?;
+        request.send(&socket, &server_address).await?;
+
+        println!("UDP request {id} sent to {server_address}");
+
+        let (packet, addr) = Box::pin(Packet::receive(&socket)).await?;
+        assert_eq!(server_address, addr);
+        Ok(packet)
     }
 
     #[tokio::test]
@@ -549,13 +688,19 @@ mod tests {
     async fn test_tcp(host: &str) -> Result<()> {
         let server_address = new_socket_addr(host)?;
         parallel_requests(
-            move |minion| async move { minion.serve_tcp(&server_address).await },
-            move |id, packet| async move {
-                let mut stream = TcpStream::connect(server_address).await?;
-                communicate("TCP", id, &server_address, packet, &mut stream).await
-            },
+            move |minion| async move { minion.serve_tcp(&server_address, &[Service::Info]).await },
+            move |id, packet| test_packet_tcp(id, server_address, packet),
         )
         .await
+    }
+
+    async fn test_packet_tcp(
+        id: String,
+        server_address: SocketAddr,
+        packet: Packet,
+    ) -> Result<Packet> {
+        let mut stream = TcpStream::connect(server_address).await?;
+        communicate("TCP", id, server_address, packet, &mut stream).await
     }
 
     async fn parallel_requests<S, SR, C, CR>(start: S, communicate: C) -> Result<()>
@@ -643,14 +788,18 @@ mod tests {
         parallel_requests(
             move |minion| async move {
                 minion
-                    .serve_tls(&server_address, &tls_minion_config(minion_auth))
+                    .serve_tls(
+                        &server_address,
+                        &tls_minion_config(minion_auth),
+                        &[Service::Info],
+                    )
                     .await
             },
             move |id, packet| {
                 let config = Arc::clone(&config);
                 async move {
                     let mut stream = tls_connect(server_address, config).await?;
-                    communicate("TLS", id, &server_address, packet, &mut stream).await
+                    communicate("TLS", id, server_address, packet, &mut stream).await
                 }
             },
         )
@@ -689,7 +838,7 @@ mod tests {
     async fn communicate<T: AsyncRead + AsyncWrite + Unpin>(
         ty: &str,
         id: String,
-        server_address: &SocketAddr,
+        server_address: SocketAddr,
         packet: Packet,
         stream: &mut T,
     ) -> Result<Packet> {
@@ -884,7 +1033,7 @@ mod tests {
     async fn test_exec_echo_net() -> Result<()> {
         let minion = Minion::new("test");
         let minion_addr = new_socket_addr("127.0.0.2")?;
-        minion.serve_tcp(&minion_addr).await?;
+        minion.serve_tcp(&minion_addr, &[Service::Exec]).await?;
         let stream = &mut TcpStream::connect(minion_addr).await?;
 
         let request = exec_request("echo 123", "echo 123");
@@ -907,7 +1056,7 @@ mod tests {
         let minion = Minion::new("test");
         let minion_addr = new_socket_addr("127.0.0.2")?;
         minion
-            .serve_legacy(&minion_addr, &tls_minion_config(None))
+            .serve_legacy(&minion_addr, &tls_minion_config(None), &[Service::Exec])
             .await?;
         let stream = &mut tls_connect(minion_addr, tls_client_config(true)?).await?;
 
@@ -943,6 +1092,104 @@ mod tests {
             };
         }
         check_exec(test, 0, &["123"], &[]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_serve_info_tcp_udp_distinct() -> Result<()> {
+        test_serve(&[Service::Info], &three_addresses()?, &three_addresses()?).await
+    }
+
+    #[tokio::test]
+    async fn test_serve_info_tcp_udp_same() -> Result<()> {
+        let addresses = three_addresses()?;
+        test_serve(&[Service::Info], &addresses, &addresses).await
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "unexpected end of file")]
+    async fn test_serve_no_info_tcp() {
+        test_serve(&[Service::Exec], &three_addresses().expect("valid"), &[])
+            .await
+            .expect("panic");
+    }
+
+    fn three_addresses() -> Result<Vec<SocketAddr>, Error> {
+        let tcp_udp_addrs = (1..=3)
+            .map(|i| new_socket_addr(&format!("127.0.0.{i}")))
+            .collect::<Result<Vec<SocketAddr>>>()?;
+        Ok(tcp_udp_addrs)
+    }
+
+    async fn test_serve(
+        services: &[Service],
+        tcp_addrs: &[SocketAddr],
+        udp_addrs: &[SocketAddr],
+    ) -> Result<()> {
+        let minion = Minion::new("test_serve_info");
+        let _: Vec<JoinHandle<()>> = minion
+            .serve(&ServeConfig {
+                tcp: tcp_udp_config(services, tcp_addrs),
+                udp: tcp_udp_config(services, udp_addrs),
+                tls: None,
+                legacy: None,
+            })
+            .await?;
+        for addr in tcp_addrs {
+            test_info_tcp(&minion.id, *addr).await?;
+        }
+        for addr in udp_addrs {
+            test_info_udp(&minion.id, *addr).await?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::indexing_slicing)]
+    fn tcp_udp_config(services: &[Service], addrs: &[SocketAddr]) -> Option<Vec<BindConfig>> {
+        (addrs.len() == 3).then(|| {
+            vec![
+                BindConfig {
+                    bind: vec![addrs[0], addrs[1]],
+                    services: services.to_vec(),
+                },
+                BindConfig {
+                    bind: vec![addrs[2]],
+                    services: services.to_vec(),
+                },
+            ]
+        })
+    }
+
+    async fn test_info_tcp(minion_id: &str, server_address: SocketAddr) -> Result<()> {
+        let request = InfoRequest {
+            request_id: format!("{minion_id}_{server_address}"),
+        };
+        let response = InfoResponse::from_packet(
+            &test_packet_tcp(
+                request.request_id.clone(),
+                server_address,
+                request.to_packet(),
+            )
+            .await?,
+        )?;
+        check_response(minion_id, &request, &response);
+        Ok(())
+    }
+
+    async fn test_info_udp(minion_id: &str, server_address: SocketAddr) -> Result<()> {
+        let request = InfoRequest {
+            request_id: format!("{minion_id}_{server_address}"),
+        };
+        let response = InfoResponse::from_packet(
+            &test_packet_udp(
+                request.request_id.clone(),
+                server_address,
+                "127.0.0.1".to_owned(),
+                request.to_packet(),
+            )
+            .await?,
+        )?;
+        check_response(minion_id, &request, &response);
         Ok(())
     }
 }

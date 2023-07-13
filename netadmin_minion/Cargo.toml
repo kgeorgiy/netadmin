@@ -17,5 +17,6 @@ rcgen = "0.11.1"
 rustls-pemfile = "1.0.3"
 serde = { version = "1.0.169", features = ["derive"] }
 serde_json = "1.0.100"
+serde_yaml = "0.9.22"
 tokio = { version = "1.29.1", features = ["net", "macros", "rt-multi-thread", "time", "io-util", "process", "sync"] }
 tokio-rustls = "0.24.1"
