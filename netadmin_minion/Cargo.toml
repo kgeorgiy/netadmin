@@ -20,3 +20,7 @@ serde_json = "1.0.100"
 serde_yaml = "0.9.22"
 tokio = { version = "1.29.1", features = ["net", "macros", "rt-multi-thread", "time", "io-util", "process", "sync"] }
 tokio-rustls = "0.24.1"
+tracing = "0.1.37"
+tracing-appender = "0.2.2"
+tracing-subscriber = "0.3.17"
+tracing-test = "0.2.4"

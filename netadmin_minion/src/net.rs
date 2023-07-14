@@ -1,20 +1,34 @@
-use core::{fmt::Debug, time::Duration};
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::str;
-use std::sync::Arc;
+use core::{
+    fmt::{Debug, Formatter},
+    time::Duration,
+};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    str,
+    sync::Arc,
+};
 
+use crate::log::Log;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::Mutex;
-use tokio::time::sleep;
-use tokio_rustls::rustls::server::{AllowAnyAuthenticatedClient, NoClientAuth};
-use tokio_rustls::rustls::{Certificate, ClientConfig, PrivateKey, RootCertStore, ServerConfig};
-use tokio_rustls::{server::TlsStream, TlsAcceptor};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{TcpListener, TcpStream, UdpSocket},
+    sync::Mutex,
+    time::sleep,
+};
+use tokio_rustls::{
+    rustls::{
+        server::{AllowAnyAuthenticatedClient, NoClientAuth},
+        Certificate, ClientConfig, PrivateKey, RootCertStore, ServerConfig,
+    },
+    server::TlsStream,
+    TlsAcceptor,
+};
+use tracing::trace;
 
 //
 // Message
@@ -52,13 +66,18 @@ pub trait Message: Serialize + for<'a> Deserialize<'a> + Debug + Send + 'static 
 
 /// Sends [`Message`]s
 #[async_trait]
-pub trait MessageTransmitter: Send + Clone + 'static {
-    async fn send<M: Message>(&self, message: M) -> Result<()>;
+pub trait MessageTransmitter: Send + Sync + Clone + Debug + 'static {
+    async fn send<M: Message>(&self, message: M) -> Result<()> {
+        trace!("Sending {message:?}");
+        self.send_silent(message).await
+    }
+
+    async fn send_silent<M: Message>(&self, message: M) -> Result<()>;
 }
 
 /// Sends [`Message`]s in JSON
 #[must_use]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct JsonTransmitter<T: Transmitter> {
     transmitter: T,
 }
@@ -71,7 +90,7 @@ impl<T: Transmitter> JsonTransmitter<T> {
 
 #[async_trait]
 impl<T: Transmitter> MessageTransmitter for JsonTransmitter<T> {
-    async fn send<M: Message>(&self, message: M) -> Result<()> {
+    async fn send_silent<M: Message>(&self, message: M) -> Result<()> {
         let packet = message.to_packet();
         self.transmitter.send(packet).await
     }
@@ -170,24 +189,39 @@ impl Packet {
     }
 }
 
+impl Debug for Packet {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        f.write_fmt(format_args!(
+            "Packet[{}, {}]",
+            self.ty,
+            Log::str_or_bin(&self.payload)
+        ))
+    }
+}
+
 //
 // Receiver, Transmitter
 
 /// Receives [`Packet`]s
 #[async_trait]
 pub trait Receiver<T: Transmitter>: Send + 'static {
-    async fn receive(&mut self) -> Result<(Packet, T)>;
+    async fn receive(&mut self) -> Result<(Packet, T, SocketAddr)>;
 }
 
 /// Sends [`Packet`]s
 #[async_trait]
-pub trait Transmitter: Send + Sync + Unpin + Clone + 'static {
-    async fn send(&self, packet: Packet) -> Result<()>;
+pub trait Transmitter: Send + Sync + Unpin + Clone + Debug + 'static {
+    async fn send(&self, packet: Packet) -> Result<()> {
+        trace!("Sending {packet:?}");
+        self.send_silent(packet).await
+    }
+
+    async fn send_silent(&self, packet: Packet) -> Result<()>;
 }
 
 #[async_trait]
-impl<T: AsyncWrite + Send + Unpin + 'static> Transmitter for Arc<Mutex<T>> {
-    async fn send(&self, packet: Packet) -> Result<()> {
+impl<T: AsyncWrite + Send + Unpin + Debug + 'static> Transmitter for Arc<Mutex<T>> {
+    async fn send_silent(&self, packet: Packet) -> Result<()> {
         packet.write(&mut *self.lock().await).await
     }
 }
@@ -196,7 +230,7 @@ impl<T: AsyncWrite + Send + Unpin + 'static> Transmitter for Arc<Mutex<T>> {
 // UdpStream, UdpReceiver
 
 /// UDP pseudo-stream
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[must_use]
 pub struct UdpStream {
     socket: Arc<UdpSocket>,
@@ -211,7 +245,7 @@ impl UdpStream {
 
 #[async_trait]
 impl Transmitter for UdpStream {
-    async fn send(&self, packet: Packet) -> Result<()> {
+    async fn send_silent(&self, packet: Packet) -> Result<()> {
         packet.send(&self.socket, &self.address).await
     }
 }
@@ -236,10 +270,16 @@ impl UdpReceiver {
 
 #[async_trait]
 impl Receiver<UdpStream> for UdpReceiver {
-    async fn receive(&mut self) -> Result<(Packet, UdpStream)> {
+    async fn receive(&mut self) -> Result<(Packet, UdpStream, SocketAddr)> {
         Box::pin(Packet::receive(&self.socket))
             .await
-            .map(|(packet, address)| (packet, UdpStream::new(Arc::clone(&self.socket), address)))
+            .map(|(packet, address)| {
+                (
+                    packet,
+                    UdpStream::new(Arc::clone(&self.socket), address),
+                    address,
+                )
+            })
     }
 }
 
@@ -266,15 +306,16 @@ impl TcpReceiver {
 
 #[async_trait]
 impl Receiver<Arc<Mutex<TcpStream>>> for TcpReceiver {
-    async fn receive(&mut self) -> Result<(Packet, Arc<Mutex<TcpStream>>)> {
+    async fn receive(&mut self) -> Result<(Packet, Arc<Mutex<TcpStream>>, SocketAddr)> {
         // Self::spawn(
         //     "TCP connection",
         //     async move { this.communicate(stream).await },
         // );
-        let (mut stream, _addr) = self.listener.accept().await.context("accept")?;
+        let (mut stream, addr) = self.listener.accept().await.context("accept")?;
         Ok((
             Packet::read(&mut stream).await?,
             Arc::new(Mutex::new(stream)),
+            addr,
         ))
     }
 }
@@ -486,13 +527,14 @@ impl TlsReceiver {
 
 #[async_trait]
 impl Receiver<Arc<Mutex<TlsTransmitter>>> for TlsReceiver {
-    async fn receive(&mut self) -> Result<(Packet, Arc<Mutex<TlsTransmitter>>)> {
-        let (mut transmitter, _addr) = self.listener.accept().await?;
+    async fn receive(&mut self) -> Result<(Packet, Arc<Mutex<TlsTransmitter>>, SocketAddr)> {
+        let (mut transmitter, addr) = self.listener.accept().await?;
         let packet = Packet::read(transmitter.stream()).await?;
-        Ok((packet, Arc::new(Mutex::new(transmitter))))
+        Ok((packet, Arc::new(Mutex::new(transmitter)), addr))
     }
 }
 
+#[derive(Debug)]
 pub struct TlsTransmitter {
     stream: Option<TlsStream<TcpStream>>,
 }
@@ -505,7 +547,7 @@ impl TlsTransmitter {
 
 #[async_trait]
 impl Transmitter for Arc<Mutex<TlsTransmitter>> {
-    async fn send(&self, packet: Packet) -> Result<()> {
+    async fn send_silent(&self, packet: Packet) -> Result<()> {
         packet.write(self.lock().await.stream()).await
     }
 }

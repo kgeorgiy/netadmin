@@ -4,7 +4,8 @@
     clippy::use_debug,
     clippy::std_instead_of_core,
     clippy::panic,
-    clippy::unwrap_used
+    clippy::unwrap_used,
+    clippy::str_to_string
 )]
 
 use core::{future::Future, pin::Pin};
@@ -32,6 +33,7 @@ use tokio_rustls::{
     rustls::{ClientConfig, ServerName},
     TlsConnector,
 };
+use tracing_test::traced_test;
 
 use super::{
     net::{Message, MessageTransmitter, Packet, TlsAuth, TlsClientConfig, TlsServerConfig},
@@ -48,6 +50,7 @@ fn new_socket_addr(host: &str) -> Result<SocketAddr> {
 }
 
 #[test]
+#[traced_test]
 fn local_minion() {
     let minion_id = "test_minion";
     let minion = Minion::new(minion_id);
@@ -58,6 +61,7 @@ fn local_minion() {
 }
 
 #[test]
+#[traced_test]
 fn serde() {
     let minion_id = "test_minion";
     let minion = Minion::new(minion_id);
@@ -77,11 +81,13 @@ fn check_response(minion_name: &str, request: &InfoRequest, response: &InfoRespo
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_udp_ipv4() -> Result<()> {
     test_udp("127.0.0.2", "0.0.0.0").await
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_udp_ipv6() -> Result<()> {
     test_udp("::1", "::").await
 }
@@ -113,11 +119,13 @@ async fn test_packet_udp(
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_tcp_ipv4() -> Result<()> {
     test_tcp("127.0.0.2").await
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_tcp_ipv6() -> Result<()> {
     test_tcp("::1").await
 }
@@ -194,21 +202,25 @@ fn tls_path(domain: &str, ext: &str) -> PathBuf {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_tls_ipv4() -> Result<()> {
     test_tls("127.0.0.2", Some(()), true).await
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_tls_ipv6() -> Result<()> {
     test_tls("::1", Some(()), true).await
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_tls_no_auth() -> Result<()> {
     test_tls("127.0.0.2", None, false).await
 }
 
 #[tokio::test]
+#[traced_test]
 #[should_panic(expected = "CertificateRequired")]
 async fn test_tls_missing_auth() {
     test_tls("127.0.0.2", Some(()), false).await.expect("panic");
@@ -280,6 +292,7 @@ async fn communicate<T: AsyncRead + AsyncWrite + Unpin>(
     Packet::read(stream).await
 }
 
+#[derive(Debug)]
 struct ExecTest {
     request_id: String,
     stdout: Vec<u8>,
@@ -300,7 +313,7 @@ impl ExecTest {
 
 #[async_trait]
 impl MessageTransmitter for Arc<Mutex<ExecTest>> {
-    async fn send<M: Message + 'static>(&self, mut message: M) -> Result<()> {
+    async fn send_silent<M: Message + 'static>(&self, mut message: M) -> Result<()> {
         let this = &mut *self.lock().unwrap();
         let message = &mut message as &mut dyn Any;
         if let Some(message) = message.downcast_mut::<ExecOutput>() {
@@ -324,11 +337,13 @@ impl MessageTransmitter for Arc<Mutex<ExecTest>> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_exec_echo() -> Result<()> {
     test_exec("echo hello\n", 0, &["hello"], &[]).await
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_exec_multi_echo() -> Result<()> {
     test_exec(
         "
@@ -345,6 +360,7 @@ async fn test_exec_multi_echo() -> Result<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_exec_echo_redirect() -> Result<()> {
     test_exec(
         "
@@ -361,6 +377,7 @@ async fn test_exec_echo_redirect() -> Result<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_exec_cat() -> Result<()> {
     test_exec(
         "
@@ -377,6 +394,7 @@ async fn test_exec_cat() -> Result<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_loop() -> Result<()> {
     test_exec_cb(
         "for %a in (1 2 3) do (echo %a & echo %a %a >&2)",
@@ -457,6 +475,7 @@ fn exec_request(cmd: &str, bash: &str) -> ExecRequest {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_exec_echo_net() -> Result<()> {
     let minion = Minion::new("test");
     let minion_addr = new_socket_addr("127.0.0.2")?;
@@ -479,6 +498,7 @@ async fn test_exec_echo_net() -> Result<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_exec_echo_legacy() -> Result<()> {
     let minion = Minion::new("test");
     let minion_addr = new_socket_addr("127.0.0.2")?;
@@ -523,17 +543,20 @@ async fn test_exec_echo_legacy() -> Result<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_serve_info_tcp_udp_distinct() -> Result<()> {
     test_serve(&[Service::Info], &three_addresses()?, &three_addresses()?).await
 }
 
 #[tokio::test]
+#[traced_test]
 async fn test_serve_info_tcp_udp_same() -> Result<()> {
     let addresses = three_addresses()?;
     test_serve(&[Service::Info], &addresses, &addresses).await
 }
 
 #[tokio::test]
+#[traced_test]
 #[should_panic(expected = "unexpected end of file")]
 async fn test_serve_no_info_tcp() {
     test_serve(&[Service::Exec], &three_addresses().expect("valid"), &[])

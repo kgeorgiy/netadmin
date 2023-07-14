@@ -1,20 +1,31 @@
-use core::{fmt::Debug, future::Future, mem, pin::Pin};
-use std::path::Path;
-use std::{env, net::SocketAddr, str, sync::Arc};
+use core::{
+    fmt::{Debug, Formatter},
+    future::Future,
+    mem,
+    pin::Pin,
+};
+use std::{env, net::SocketAddr, path::Path, str, sync::Arc};
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    sync::Mutex,
+    task::JoinHandle,
+};
+use tracing::{info, info_span};
 
-use crate::net::{
-    JsonTransmitter, Message, MessageTransmitter, Packet, Receiver, TcpReceiver, TlsListener,
-    TlsReceiver, TlsServerConfig, TlsTransmitter, Transmitter, UdpReceiver,
+use crate::{
+    log::{Log, LogConfig},
+    net::{
+        JsonTransmitter, Message, MessageTransmitter, Packet, Receiver, TcpReceiver, TlsListener,
+        TlsReceiver, TlsServerConfig, TlsTransmitter, Transmitter, UdpReceiver,
+    },
 };
 
+pub mod log;
 pub mod net;
 mod tests;
 
@@ -26,6 +37,8 @@ type Handler<T> =
 
 #[async_trait]
 trait RequestHandler {
+    const SERVICE: Service;
+
     async fn handle<T: MessageTransmitter>(self, minion: Arc<Minion>, transmitter: T)
         -> Result<()>;
 
@@ -33,9 +46,15 @@ trait RequestHandler {
     where
         Self: Message,
     {
+        let service = format!("{:?}", Self::SERVICE);
         let request = Self::from_packet(packet).ok()?;
-        Some(Box::new(|minion, transmitter| {
-            request.handle(minion, transmitter)
+        Some(Box::new(move |minion, transmitter| {
+            let span = info_span!("handle", service);
+            let future = async {
+                info!("Got {request:?}");
+                request.handle(minion, transmitter).await
+            };
+            Box::pin(Log::report(span, future))
         }))
     }
 }
@@ -88,6 +107,8 @@ impl Message for InfoRequest {
 
 #[async_trait]
 impl RequestHandler for InfoRequest {
+    const SERVICE: Service = Service::Info;
+
     async fn handle<T: MessageTransmitter>(
         self,
         minion: Arc<Minion>,
@@ -135,13 +156,13 @@ impl Message for ExecRequest {
 impl ExecRequest {
     fn copy<T: MessageTransmitter, R: AsyncRead + Send + Unpin + 'static>(
         self: Arc<Self>,
-        context: &'static str,
+        name: &'static str,
         stream: &mut Option<R>,
         transmitter: T,
         stderr: bool,
     ) -> Result<()> {
-        let mut stream = stream.take().context(context)?;
-        Minion::spawn(&format!("Exec ({context})"), async move {
+        let mut stream = stream.take().context(name)?;
+        Log::spawn(info_span!("copy", stream = name), async move {
             let mut buffer = [0; 0x1000];
             loop {
                 let n = stream.read(&mut buffer).await?;
@@ -154,12 +175,11 @@ impl ExecRequest {
                 if stderr {
                     mem::swap(&mut out, &mut err);
                 }
-                let result = transmitter
-                    .send(ExecOutput {
-                        request_id: self.request_id.clone(),
-                        stdout: out,
-                        stderr: err,
-                    });
+                let result = transmitter.send(ExecOutput {
+                    request_id: self.request_id.clone(),
+                    stdout: out,
+                    stderr: err,
+                });
                 result.await?;
             }
         });
@@ -169,6 +189,8 @@ impl ExecRequest {
 
 #[async_trait]
 impl RequestHandler for ExecRequest {
+    const SERVICE: Service = Service::Exec;
+
     async fn handle<T: MessageTransmitter>(self, _minion: Arc<Minion>, tx: T) -> Result<()> {
         use std::process::Stdio;
         use tokio::process::Command;
@@ -211,7 +233,7 @@ impl RequestHandler for ExecRequest {
 }
 
 /// Command output
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize)]
 #[must_use]
 pub struct ExecOutput {
     request_id: String,
@@ -220,6 +242,17 @@ pub struct ExecOutput {
     /// New data from `stderr`
     /// Empty if [`ExecRequest::join_stderr`] was `true`,
     stderr: Vec<u8>,
+}
+
+impl Debug for ExecOutput {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        f.write_fmt(format_args!(
+            "ExecOutput {{ request_id: \"{}\", stdout: {}, stderr: {} }}",
+            self.request_id,
+            Log::str_or_bin(&self.stdout),
+            Log::str_or_bin(&self.stderr),
+        ))
+    }
 }
 
 impl Message for ExecOutput {
@@ -264,8 +297,8 @@ impl LegacyReceiver {
 
 #[async_trait]
 impl Receiver<Arc<Mutex<LegacyTransmitter>>> for LegacyReceiver {
-    async fn receive(&mut self) -> Result<(Packet, Arc<Mutex<LegacyTransmitter>>)> {
-        let (mut transmitter, _addr) = self.listener.accept().await?;
+    async fn receive(&mut self) -> Result<(Packet, Arc<Mutex<LegacyTransmitter>>, SocketAddr)> {
+        let (mut transmitter, addr) = self.listener.accept().await?;
 
         let request = {
             let stream = transmitter.stream();
@@ -288,10 +321,12 @@ impl Receiver<Arc<Mutex<LegacyTransmitter>>> for LegacyReceiver {
         Ok((
             request.to_packet(),
             Arc::new(Mutex::new(LegacyTransmitter { transmitter })),
+            addr,
         ))
     }
 }
 
+#[derive(Debug)]
 struct LegacyTransmitter {
     transmitter: TlsTransmitter,
 }
@@ -303,7 +338,7 @@ impl LegacyTransmitter {
 
 #[async_trait]
 impl Transmitter for Arc<Mutex<LegacyTransmitter>> {
-    async fn send(&self, packet: Packet) -> Result<()> {
+    async fn send_silent(&self, packet: Packet) -> Result<()> {
         let mut guard = self.lock().await;
         let stream = guard.transmitter.stream();
         match packet.ty() {
@@ -329,6 +364,7 @@ impl Transmitter for Arc<Mutex<LegacyTransmitter>> {
 //
 // Minion
 
+#[derive(Debug)]
 #[must_use]
 pub struct Minion {
     id: String,
@@ -410,7 +446,7 @@ impl Minion {
 
     fn serve_proto<T, R>(
         self: &Arc<Self>,
-        protocol: &str,
+        proto: &str,
         services: &[Service],
         mut receiver: R,
     ) -> JoinHandle<()>
@@ -420,57 +456,30 @@ impl Minion {
     {
         let handlers = services.iter().map(Service::handler).collect::<Vec<_>>();
 
-        let protocol = protocol.to_owned();
         let this = Arc::clone(self);
-        Self::spawn::<_, ()>(&format!("Serve {protocol}"), async move {
+        Log::spawn::<(), _>(info_span!("serve", %proto), async move {
             loop {
                 match receiver.receive().await {
-                    Ok((packet, transmitter)) => {
+                    Ok((packet, tx, client_addr)) => {
                         let this = Arc::clone(&this);
                         let handlers = handlers.clone();
-                        Self::spawn(&format!("{protocol} connection"), async move {
-                            for handler in &handlers {
-                                if let Some(request) = handler(&packet) {
-                                    return request(this, JsonTransmitter::new(transmitter)).await;
+                        Log::spawn(
+                            info_span!("client", addr = format!("{client_addr:?}")),
+                            async move {
+                                for handler in &handlers {
+                                    if let Some(request) = handler(&packet) {
+                                        return request(this, JsonTransmitter::new(tx)).await;
+                                    }
                                 }
-                            }
 
-                            Err(anyhow!("Unknown or forbidden packet type"))
-                        });
+                                Err(anyhow!("Unknown or forbidden packet type"))
+                            },
+                        );
                     }
-                    Err(error) => Self::log_error(&format!("{protocol} accept"), &error),
+                    Err(error) => Log::log_error(&error),
                 }
             }
         })
-    }
-
-    fn spawn<F, T>(context: &str, future: F) -> JoinHandle<()>
-    where
-        F: Future<Output = Result<T>> + Send + 'static,
-        T: Debug,
-    {
-        let context = context.to_owned();
-        tokio::spawn(async move {
-            match future.await {
-                Ok(value) => Self::log_success(&context, &value),
-                Err(error) => Self::log_error(&context, &error),
-            };
-        })
-    }
-
-    #[allow(clippy::use_debug, clippy::print_stderr)]
-    fn log_success<T: Debug>(context: &str, value: &T) {
-        eprintln!("{context}: Success {value:?}");
-    }
-
-    #[allow(clippy::use_debug, clippy::print_stderr)]
-    fn log_error(context: &str, error: &Error) {
-        let causes: String = error
-            .chain()
-            .skip(1)
-            .map(|err| format!("\n    Caused by: {err}"))
-            .collect();
-        eprintln!("{context}: Error {error}{causes}");
     }
 
     /// Creates minion that serves specified ports and protocols
@@ -478,7 +487,11 @@ impl Minion {
     /// # Errors
     /// - Duplicate ports
     /// - Invalid TLS keys or certificates
-    pub async fn create_and_serve(config: &MinionConfig) -> Result<Vec<JoinHandle<()>>> {
+    pub async fn create_and_serve(
+        config: &MinionConfig,
+        log: &mut Log,
+    ) -> Result<Vec<JoinHandle<()>>> {
+        log.set_global(&config.log)?;
         Minion::new(&config.id).serve(&config.serve).await
     }
 
@@ -561,6 +574,7 @@ impl ServeConfig {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MinionConfig {
     id: String,
+    log: LogConfig,
     serve: ServeConfig,
 }
 

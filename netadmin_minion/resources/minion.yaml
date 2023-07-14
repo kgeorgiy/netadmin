@@ -8,6 +8,9 @@
 # - info (basic minion information)
 # - exec (remote command execution, should be provided only on secure connections with client authentication)
 id: test-minion
+log:
+  file: __minion.log
+  level: trace
 serve:
   udp:
     - bind:
