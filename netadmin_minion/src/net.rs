@@ -20,7 +20,7 @@ use tokio_rustls::{server::TlsStream, TlsAcceptor};
 // Message
 
 /// Network message
-pub trait Message: Serialize + for<'a> Deserialize<'a> + Debug + Send + Sync + 'static {
+pub trait Message: Serialize + for<'a> Deserialize<'a> + Debug + Send + 'static {
     const PACKET_TYPE: u32;
 
     /// Converts to packet containing UTF-8 encoded JSON string
@@ -52,7 +52,7 @@ pub trait Message: Serialize + for<'a> Deserialize<'a> + Debug + Send + Sync + '
 
 /// Sends [`Message`]s
 #[async_trait]
-pub trait MessageTransmitter: Send + Sync + Clone + 'static {
+pub trait MessageTransmitter: Send + Clone + 'static {
     async fn send<M: Message>(&self, message: M) -> Result<()>;
 }
 
@@ -72,7 +72,8 @@ impl<T: Transmitter> JsonTransmitter<T> {
 #[async_trait]
 impl<T: Transmitter> MessageTransmitter for JsonTransmitter<T> {
     async fn send<M: Message>(&self, message: M) -> Result<()> {
-        self.transmitter.send(message.to_packet()).await
+        let packet = message.to_packet();
+        self.transmitter.send(packet).await
     }
 }
 

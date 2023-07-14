@@ -93,7 +93,8 @@ impl RequestHandler for InfoRequest {
         minion: Arc<Minion>,
         transmitter: T,
     ) -> Result<()> {
-        transmitter.send(self.response(&minion)).await
+        let result = transmitter.send(self.response(&minion));
+        result.await
     }
 }
 
@@ -153,13 +154,13 @@ impl ExecRequest {
                 if stderr {
                     mem::swap(&mut out, &mut err);
                 }
-                transmitter
+                let result = transmitter
                     .send(ExecOutput {
                         request_id: self.request_id.clone(),
                         stdout: out,
                         stderr: err,
-                    })
-                    .await?;
+                    });
+                result.await?;
             }
         });
         Ok(())
@@ -200,12 +201,12 @@ impl RequestHandler for ExecRequest {
             .wait()
             .await
             .expect("child process encountered an error");
-        tx.send(ExecResult {
+        let result = tx.send(ExecResult {
             request_id: this.request_id.clone(),
             exit_code: status.code().unwrap_or(ExecResult::UNDEFINED_EXIT_CODE),
             exit_comment: format!("{status}"),
-        })
-        .await
+        });
+        result.await
     }
 }
 
