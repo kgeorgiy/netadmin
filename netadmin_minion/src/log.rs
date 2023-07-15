@@ -1,14 +1,18 @@
 use core::{fmt::Debug, future::Future, str};
-use std::path::PathBuf;
+use std::env;
+use std::fs::File;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Error, Result};
 use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
 use tokio::task::JoinHandle;
 use tracing::{
     info, level_filters::LevelFilter, subscriber, subscriber::DefaultGuard, warn, Instrument,
     Level, Span,
 };
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
+use tracing_appender::rolling::RollingFileAppender;
 use tracing_subscriber::fmt::{
     format::{DefaultFields, Format},
     Subscriber,
@@ -65,7 +69,7 @@ impl LogConfig {
         WorkerGuard,
         Subscriber<DefaultFields, Format, LevelFilter, NonBlocking>,
     )> {
-        let file_appender = tracing_appender::rolling::daily(
+        let file_appender: RollingFileAppender = tracing_appender::rolling::daily(
             self.file.parent().context("log file parent exits")?,
             self.file.file_name().context("log file name exits")?,
         );
@@ -76,6 +80,7 @@ impl LogConfig {
             .with_writer(non_blocking)
             .with_ansi(false)
             .finish();
+        info!("Logging to {:?}", self.file);
         Ok((guard, subscriber))
     }
 }
@@ -170,5 +175,12 @@ impl Log {
     #[must_use]
     pub fn str_or_bin(data: &[u8]) -> String {
         str::from_utf8(data).map_or_else(|_| format!("{data:?}"), |s| format!("\"{}\"", s.trim()))
+    }
+
+    pub fn load_config<C: DeserializeOwned>(path: &Path) -> Result<C> {
+        let path = &env::current_dir()?.join(path);
+        info!("Using configuration file {path:?}");
+        let config_file = File::open(path).context("Failed to open configuration file")?;
+        serde_yaml::from_reader::<_, C>(&config_file).context("Failed to parse configuration file")
     }
 }
