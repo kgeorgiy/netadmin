@@ -13,10 +13,17 @@ public final class MinionInfoTest {
     }
 
     public static void main(final String[] args) throws Exception {
-        if (args.length != 1) {
-            System.err.println("Usage: java MinionInfoTest.java [jks]");
+        if (args.length != 3) {
+            System.err.println("Usage: java MinionInfoTest.java JKS HOST PORT");
+            System.err.println("Where");
+            System.err.println("    JKS        - Path to .jks key store");
+            System.err.println("    HOST       - NetAdmin Minion host");
+            System.err.println("    PORT       - NetAdmin Minion port");
+            System.exit(1);
         }
         final String jksFile = args[0];
+        final String host = args[1];
+        final int port = Integer.parseInt(args[2]);
 
         System.out.println("Java version: " + System.getProperty("java.version"));
 
@@ -40,7 +47,7 @@ public final class MinionInfoTest {
         final SSLSocketFactory socketFactory = context.getSocketFactory();
         for (int i = 0; i < 10; i++) {
             try (
-                    final SSLSocket socket = (SSLSocket) socketFactory.createSocket("127.0.0.1", 6236);
+                    final SSLSocket socket = (SSLSocket) socketFactory.createSocket(host, port);
                     final DataInputStream in = new DataInputStream(socket.getInputStream());
                     final DataOutputStream out = new DataOutputStream(socket.getOutputStream());
             ) {
