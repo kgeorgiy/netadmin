@@ -179,6 +179,11 @@ impl Log {
         str::from_utf8(data).map_or_else(|_| format!("{data:?}"), |s| format!("\"{}\"", s.trim()))
     }
 
+    /// Load main configuration file
+    ///
+    /// # Errors
+    /// - Specified path does not exists
+    /// - Configuration format error
     pub fn load_config<C: DeserializeOwned>(path: &Path) -> Result<C> {
         let path = &env::current_dir()?.join(path);
         info!("Using configuration file {path:?}");
