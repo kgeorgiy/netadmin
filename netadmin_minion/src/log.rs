@@ -5,8 +5,8 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Error, Result};
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tracing::{
     info, level_filters::LevelFilter, subscriber, subscriber::DefaultGuard, warn, Instrument,
