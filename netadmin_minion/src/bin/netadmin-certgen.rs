@@ -219,13 +219,7 @@ fn main() -> Result<()> {
 }
 
 fn load_config(path: &Path) -> Result<CertgenConfig> {
-    let path = &env::current_dir()?.join(path);
-    info!("Using configuration file {path:?}");
-    let mut config: CertgenConfig = {
-        let config_file = File::open(path).context("Failed to open configuration file")?;
-        serde_yaml::from_reader(&config_file).context("Failed to parse configuration file")?
-    };
-
+    let mut config: CertgenConfig = Log::load_config(path)?;
     let base = path.parent().context("Has parent path")?;
     config.minion.resolve(base, Minion::MINION_DOMAIN);
     config.server.resolve(base, Minion::CLIENT_DOMAIN);
