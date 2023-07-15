@@ -43,6 +43,7 @@ NetAdmin remote info and command execution service.
 * Test generated keys before transferring them to NASS.
   Here `HOST` is a NetAdmin Minion host.
   To run test scripts on Windows use `sh` bundled with Git.
+    * Copy `__keys` and `test` directories to server.
     * Run `test/run-MinionInfoTest.sh HOST` to test info service
         * Requres Java 8+
         * JSON with basic minion info should be printed ten times
@@ -54,5 +55,5 @@ NetAdmin remote info and command execution service.
         Exit code: 0
         ```
 * Copy `__keys/netadmin-server.jks` to `$NetAdmin/keys/`.
-* Edit `NetAdmin/linux-*.xml as` necessary.
+* Edit `$NetAdmin/linux-*.xml as` necessary.
 * Try to execute "Echo" task via NetAdmin
