@@ -6,11 +6,11 @@ use std::{env, fs, str};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
+use netadmin_minion::log::Log;
 use netadmin_minion::Minion;
 use rcgen::{Certificate, CertificateParams, DistinguishedName, DnType};
 use serde::{Deserialize, Serialize};
 use tracing::info;
-use netadmin_minion::log::Log;
 
 struct CertificateFiles {
     name: String,
@@ -24,7 +24,8 @@ struct CertificateFiles {
 
 impl CertificateFiles {
     fn new(name: &str, target: &Path, pass: &str) -> Result<CertificateFiles> {
-        let dir = target.parent()
+        let dir = target
+            .parent()
             .context(format!("No parent directory for {target:?}"))?;
         Ok(CertificateFiles {
             name: name.to_owned(),
@@ -38,7 +39,11 @@ impl CertificateFiles {
     }
 
     fn with_extension(target: &Path, extension: &str) -> String {
-        target.with_extension(extension).to_str().expect("unicode").to_owned()
+        target
+            .with_extension(extension)
+            .to_str()
+            .expect("unicode")
+            .to_owned()
     }
 
     fn generate(&self) -> Result<()> {
@@ -60,27 +65,31 @@ impl CertificateFiles {
     }
 
     fn generate_legacy(&self) -> Result<()> {
-        Self::run(Command::new("openssl")
-            .args(["pkcs12"])
-            .args(["-inkey", &self.key])
-            .args(["-in", &self.crt])
-            .args(["-no-CAfile", "-no-CApath"])
-            .args(["-export", "-out", &self.p12])
-            .args(["-password", &format!("pass:{}", self.pass)]))?;
+        Self::run(
+            Command::new("openssl")
+                .args(["pkcs12"])
+                .args(["-inkey", &self.key])
+                .args(["-in", &self.crt])
+                .args(["-no-CAfile", "-no-CApath"])
+                .args(["-export", "-out", &self.p12])
+                .args(["-password", &format!("pass:{}", self.pass)]),
+        )?;
 
         if Path::new(&self.jks).exists() {
             fs::remove_file(&self.jks).context("Remove .jks")?;
         }
-        Self::run(Command::new("keytool")
-            .args(["-importkeystore"])
-            .args(["-alias", "1"])
-            .args(["-srckeystore", &self.p12])
-            .args(["-srcstoretype", "pkcs12"])
-            .args(["-srcstorepass", &self.pass])
-            .args(["-destkeystore", &self.jks])
-            .args(["-deststoretype", "jks"])
-            .args(["-deststorepass", &self.pass])
-            .args(["-destalias", &self.name]))?;
+        Self::run(
+            Command::new("keytool")
+                .args(["-importkeystore"])
+                .args(["-alias", "1"])
+                .args(["-srckeystore", &self.p12])
+                .args(["-srcstoretype", "pkcs12"])
+                .args(["-srcstorepass", &self.pass])
+                .args(["-destkeystore", &self.jks])
+                .args(["-deststoretype", "jks"])
+                .args(["-deststorepass", &self.pass])
+                .args(["-destalias", &self.name]),
+        )?;
         Ok(())
     }
 
@@ -93,13 +102,15 @@ impl CertificateFiles {
     }
 
     fn add_trust(&self, other: &CertificateFiles) -> Result<()> {
-        Self::run(Command::new("keytool")
-            .args(["-importcert", "-trustcacerts", "-noprompt"])
-            .args(["-alias", &other.name])
-            .args(["-file", &other.crt])
-            .args(["-keystore", &self.jks])
-            .args(["-storepass", &self.pass])
-            .args(["-keypass", &self.pass]))
+        Self::run(
+            Command::new("keytool")
+                .args(["-importcert", "-trustcacerts", "-noprompt"])
+                .args(["-alias", &other.name])
+                .args(["-file", &other.crt])
+                .args(["-keystore", &self.jks])
+                .args(["-storepass", &self.pass])
+                .args(["-keypass", &self.pass]),
+        )
     }
 
     fn run(command: &mut Command) -> Result<()> {
@@ -110,11 +121,11 @@ impl CertificateFiles {
             Ok(())
         } else {
             Err(anyhow!(format!(
-            "Exit code {}\n{}\n{}",
-            output.status,
-            str::from_utf8(&output.stderr)?,
-            str::from_utf8(&output.stdout)?,
-        )))
+                "Exit code {}\n{}\n{}",
+                output.status,
+                str::from_utf8(&output.stderr)?,
+                str::from_utf8(&output.stdout)?,
+            )))
         }
     }
 }
@@ -153,30 +164,42 @@ struct CertificateConfig {
 impl CertificateConfig {
     fn resolve(&mut self, base: &Path, domain: &str) {
         self.target = base.join(&self.target);
-        self.domain = Some(self.domain.take()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| domain.to_owned()));
+        self.domain = Some(
+            self.domain
+                .take()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| domain.to_owned()),
+        );
     }
 
     fn files(&self, pass: &str) -> Result<CertificateFiles> {
-        CertificateFiles::new(self.domain.as_ref().context("resolved")?, &self.target, pass)
+        CertificateFiles::new(
+            self.domain.as_ref().context("resolved")?,
+            &self.target,
+            pass,
+        )
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct LegacyConfig {
     #[serde(alias = "keystore-password")]
-    keystore_password: String
+    keystore_password: String,
 }
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = "NetAdmin certificate generator")]
 struct Cli {
     /// Configuration file location
-    #[arg(short, long, value_name = "FILE", default_value = "resources/netadmin-certgen.yaml")]
+    #[arg(
+        short,
+        long,
+        value_name = "FILE",
+        default_value = "resources/netadmin-certgen.yaml"
+    )]
     config: PathBuf,
 
-    #[arg(short, long, value_name = "FILE", default_value_t = true)]
+    #[arg(short, long, value_name = "TRUE_OF_FALSE", default_value_t = true)]
     legacy: bool,
 }
 
@@ -193,10 +216,8 @@ fn load_config(path: &Path) -> Result<CertgenConfig> {
     let path = &env::current_dir()?.join(path);
     info!("Using configuration file {path:?}");
     let mut config: CertgenConfig = {
-        let config_file = File::open(path)
-            .context("Failed to open configuration file")?;
-        serde_yaml::from_reader(&config_file)
-            .context("Failed to parse configuration file")?
+        let config_file = File::open(path).context("Failed to open configuration file")?;
+        serde_yaml::from_reader(&config_file).context("Failed to parse configuration file")?
     };
 
     let base = path.parent().context("Has parent path")?;
