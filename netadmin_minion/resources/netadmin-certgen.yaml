@@ -1,0 +1,8 @@
+minion:
+  domain: "" # Default
+  target: ../__keys/netadmin-minion
+server:
+  domain: "" # Default
+  target: ../__keys/netadmin-server
+legacy: # Optional
+  keystore-password: "vc/iIcg1R/Zbuf55a/Yu7d35EvCX7rNPYgarD5KK8UAlzh7KZRYz5LQ1wxmSo8IZ36X7kytSrHQ6"

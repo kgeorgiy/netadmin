@@ -13,18 +13,19 @@ object LegacyExecTest {
 
   def main(args: Array[String]) {
     println(new File(".").getAbsolutePath)
-    if (args.length < 2) {
-        println("Usage: scala LegacyExecTest [host] [port] [command]")
+    if (args.length < 3) {
+        println("Usage: scala LegacyExecTest [jks] [host] [port] [command]")
         System.exit(1)
     }
 
-    val host = args(0)
-    val port = args(1).toInt
-    val command = args.slice(2, args.length).mkString(" ")
+    val jks = args(0)
+    val host = args(1)
+    val port = args(2).toInt
+    val command = args.slice(3, args.length).mkString(" ")
 
     try {
       val keyStore = new KeyStore(
-        "__keys/client.netadmin.test.jks",
+        jks,
         "vc/iIcg1R/Zbuf55a/Yu7d35EvCX7rNPYgarD5KK8UAlzh7KZRYz5LQ1wxmSo8IZ36X7kytSrHQ6"
       )
       keyStore.check()
