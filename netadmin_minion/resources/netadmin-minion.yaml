@@ -7,7 +7,8 @@
 #  Supported services
 # - info (basic minion information)
 # - exec (remote command execution, should be provided only on secure connections with client authentication)
-id: test-minion
+id: example
+pid: /var/run/netadmin-minion.pid
 log:
   file: /var/log/netadmin-minion.log
   level: trace
