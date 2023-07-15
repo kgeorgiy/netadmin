@@ -134,7 +134,7 @@ impl Log {
         .await
     }
 
-    fn log_result<T: Debug>(result: &Result<T>) {
+    pub fn log_result<T: Debug>(result: &Result<T>) {
         match *result {
             Ok(ref value) => {
                 let value = format!("{value:?}");

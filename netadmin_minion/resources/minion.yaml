@@ -9,7 +9,7 @@
 # - exec (remote command execution, should be provided only on secure connections with client authentication)
 id: test-minion
 log:
-  file: __minion.log
+  file: /var/log/__minion.log
   level: trace
 serve:
   udp:
@@ -29,16 +29,16 @@ serve:
         - "0.0.0.0:6236"
         - "[::]:6236"
       services: [info, exec]
-      private-key: minion.key
-      certificate: minion.crt
+      private-key: netadmin-minion.key
+      certificate: netadmin-minion.crt
       # Optional, disables client authentication on removal
-      client-auth: client.crt
+      client-auth: netadmin-server.crt
 
   legacy:
     - bind:
         - "0.0.0.0:12345"
         - "[::]:12345"
       services: [info, exec]
-      private-key: minion.key
-      certificate: minion.crt
-      client-auth: client.crt   # Optional. Removal disables client authentication
+      private-key: netadmin-minion.key
+      certificate: netadmin-minion.crt
+      client-auth: netadmin-server.crt   # Optional. Removal disables client authentication

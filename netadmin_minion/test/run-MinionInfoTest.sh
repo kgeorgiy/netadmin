@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-pushd .. > /dev/nul
-java test/MinionInfoTest.java 2>&1 | tee test/__log
-popd > /dev/nul
+BASE="$(dirname "$0")"
+java "$BASE/MinionInfoTest.java" \
+    "$BASE/../__keys/netadmin-server.jks" \
+    2>&1 | tee __log

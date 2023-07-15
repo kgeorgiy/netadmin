@@ -13,11 +13,16 @@ public final class MinionInfoTest {
     }
 
     public static void main(final String[] args) throws Exception {
+        if (args.length != 1) {
+            System.err.println("Usage: java MinionInfoTest.java [jks]");
+        }
+        final String jksFile = args[0];
+
         System.out.println("Java version: " + System.getProperty("java.version"));
 
         final char[] password = "vc/iIcg1R/Zbuf55a/Yu7d35EvCX7rNPYgarD5KK8UAlzh7KZRYz5LQ1wxmSo8IZ36X7kytSrHQ6".toCharArray();
         final KeyStore jks = KeyStore.getInstance("JKS");
-        try (final FileInputStream is = new FileInputStream("__keys/client.netadmin.test.jks")) {
+        try (final FileInputStream is = new FileInputStream(jksFile)) {
             jks.load(is, password);
         }
 
