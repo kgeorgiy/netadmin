@@ -38,7 +38,7 @@ NetAdmin remote info and command execution service.
     ```
 * Continue to [setup NetAdmin Scala Server](#keys)
 
-## <a name="scala">[NetAdmin Scala Server integration]</a>
+## <a name="scala">NetAdmin Scala Server integration</a>
 
 * Test generated keys before transferring them to NASS.
     * Run `test/run-MinionInfoTest.sh HOST` to test info service
