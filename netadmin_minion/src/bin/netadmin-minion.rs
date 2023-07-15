@@ -1,19 +1,32 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Result;
+use clap::Parser;
 use tracing::error;
 
 use netadmin_minion::{log::Log, Minion, MinionConfig};
 
+#[derive(Parser)]
+#[command(author, version, about, long_about = "NetAdmin certificate generator")]
+struct Cli {
+    /// Configuration file location
+    #[clap(
+        short,
+        long,
+        value_name = "FILE",
+        default_value = "resources/netadmin-minion.yaml"
+    )]
+    config: PathBuf,
+}
+
 #[tokio::main]
 #[allow(clippy::print_stderr)]
 async fn main() -> ExitCode {
-    let config = Path::new("resources/netadmin-minion.yaml");
-
     let mut log = Log::local();
+    let cli = Cli::parse();
 
-    match run(config, &mut log).await {
+    match run(&cli.config, &mut log).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let causes: String = error

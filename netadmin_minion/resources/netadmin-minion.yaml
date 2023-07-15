@@ -9,7 +9,7 @@
 # - exec (remote command execution, should be provided only on secure connections with client authentication)
 id: test-minion
 log:
-  file: /var/log/__minion.log
+  file: /var/log/netadmin-minion.log
   level: trace
 serve:
   udp:
