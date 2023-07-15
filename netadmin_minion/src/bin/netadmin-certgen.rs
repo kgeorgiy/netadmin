@@ -1,13 +1,14 @@
-use std::fs::File;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::{fs, str};
+use std::{
+    fs::{self, File},
+    io::Write,
+    path::{Path, PathBuf},
+    process::Command,
+    str,
+};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use netadmin_minion::log::Log;
-use netadmin_minion::Minion;
+use netadmin_minion::{log::Log, Minion};
 use rcgen::{Certificate, CertificateParams, DistinguishedName, DnType};
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -191,7 +192,7 @@ struct LegacyConfig {
 #[command(author, version, about, long_about = "NetAdmin certificate generator")]
 struct Cli {
     /// Configuration file location
-    #[arg(
+    #[clap(
         short,
         long,
         value_name = "FILE",
@@ -199,15 +200,20 @@ struct Cli {
     )]
     config: PathBuf,
 
-    #[arg(short, long, value_name = "TRUE_OF_FALSE", default_value_t = true)]
+    /// Generate `.c12` and `.jks` files
+    #[clap(long, default_value_t = true)]
     legacy: bool,
+
+    /// Do not generate `.c12` and `.jks` files
+    #[clap(long, default_value_t = false)]
+    no_legacy: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let _log = Log::local();
 
-    let result = load_config(&cli.config)?.generate(cli.legacy);
+    let result = load_config(&cli.config)?.generate(cli.legacy && !cli.no_legacy);
     Log::log_result(&result);
     result
 }
