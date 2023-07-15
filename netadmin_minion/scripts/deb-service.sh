@@ -15,31 +15,19 @@ SCRIPT="/bin/$NAME"
 CONFIG="/etc/$NAME/netadmin-minion.yaml"
 PIDFILE="/var/run/$NAME.pid"
 
-running() {
-    [ -f $PIDFILE ] && kill -0 $(cat "$PIDFILE") 2> /dev/null
-}
-
 log() {
     echo $1 >&2
 }
 
 start() {
-    if running ; then
-        log "$NAME already running"
-        return 1
-    fi
-    log "Starting $NAME"
-    su -c "$SCRIPT --config $CONFIG" $RUNAS && log "$NAME started"
+    start-stop-daemon --start --user "$RUNAS" --pidfile "$PIDFILE" --name "$NAME" \
+        --chuid "$RUNAS" --background --startas "$SCRIPT" -- --config "$CONFIG" \
+        && log "$NAME started"
 }
 
 stop() {
-    if ! running ; then
-        log "$NAME not running"
-        return 1
-    fi
-    log "Stopping $NAME"
-    kill -15 $(cat "$PIDFILE") && rm -f "$PIDFILE"
-    log "$NAME stopped"
+    start-stop-daemon --stop --user "$RUNAS" --pidfile "$PIDFILE" --name "$NAME" \
+        && log "$NAME stopped"
 }
 
 case "$1" in
