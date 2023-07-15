@@ -116,7 +116,8 @@ impl CertificateFiles {
 
     fn run(command: &mut Command) -> Result<()> {
         info!("Executing {command:?}");
-        let output = command.output()
+        let output = command
+            .output()
             .context(format!("failed to execute {:?}", command.get_program()))?;
         let exit_code = output.status.code().unwrap_or(-1);
         if exit_code == 0 {
