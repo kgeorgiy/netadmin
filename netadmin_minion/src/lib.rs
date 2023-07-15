@@ -288,7 +288,7 @@ struct LegacyReceiver {
 }
 
 impl LegacyReceiver {
-    async fn new(socket_address: &SocketAddr, config: &TlsServerConfig) -> Result<Self> {
+    async fn new(socket_address: SocketAddr, config: TlsServerConfig) -> Result<Self> {
         Ok(Self {
             listener: TlsListener::new(socket_address, config).await?,
         })
@@ -386,24 +386,34 @@ impl Minion {
     ///
     /// # Errors
     /// Returns error if cannot bind to specified `socket_address`
-    pub async fn serve_udp(
+    pub fn serve_udp(
         self: &Arc<Self>,
         socket_address: &SocketAddr,
         services: &[Service],
     ) -> Result<JoinHandle<()>> {
-        Ok(self.serve_proto("UDP", services, UdpReceiver::new(socket_address).await?))
+        Ok(self.serve_proto(
+            "UDP",
+            services,
+            UdpReceiver::new(*socket_address),
+            *socket_address,
+        ))
     }
 
     /// Serves minion information on TCP port
     ///
     /// # Errors
     /// Returns error if cannot bind to specified `socket_address`
-    pub async fn serve_tcp(
+    pub fn serve_tcp(
         self: &Arc<Self>,
         socket_address: &SocketAddr,
         services: &[Service],
     ) -> Result<JoinHandle<()>> {
-        Ok(self.serve_proto("TCP", services, TcpReceiver::new(socket_address).await?))
+        Ok(self.serve_proto(
+            "TCP",
+            services,
+            TcpReceiver::new(*socket_address),
+            *socket_address,
+        ))
     }
 
     /// Serves full minion
@@ -412,7 +422,7 @@ impl Minion {
     /// Returns error if
     /// - cannot bind to specified `socket_address`
     /// - TLS `config` is invalid
-    pub async fn serve_tls(
+    pub fn serve_tls(
         self: &Arc<Self>,
         socket_address: &SocketAddr,
         config: &TlsServerConfig,
@@ -421,7 +431,8 @@ impl Minion {
         Ok(self.serve_proto(
             "TLS",
             services,
-            TlsReceiver::new(socket_address, config).await?,
+            TlsReceiver::new(*socket_address, config.clone()),
+            *socket_address,
         ))
     }
 
@@ -431,7 +442,7 @@ impl Minion {
     /// Returns error if
     /// - cannot bind to specified `socket_address`
     /// - TLS `config` is invalid
-    pub async fn serve_legacy(
+    pub fn serve_legacy(
         self: &Arc<Self>,
         socket_address: &SocketAddr,
         config: &TlsServerConfig,
@@ -440,24 +451,29 @@ impl Minion {
         Ok(self.serve_proto(
             "Legacy",
             services,
-            LegacyReceiver::new(socket_address, config).await?,
+            LegacyReceiver::new(*socket_address, config.clone()),
+            *socket_address,
         ))
     }
 
-    fn serve_proto<T, R>(
+    fn serve_proto<T, R, F>(
         self: &Arc<Self>,
         proto: &str,
         services: &[Service],
-        mut receiver: R,
+        receiver: F,
+        addr: SocketAddr,
     ) -> JoinHandle<()>
     where
         T: Transmitter,
         R: Receiver<T>,
+        F: Future<Output = Result<R>> + Send + 'static,
     {
         let handlers = services.iter().map(Service::handler).collect::<Vec<_>>();
 
         let this = Arc::clone(self);
-        Log::spawn::<(), _>(info_span!("serve", %proto), async move {
+        Log::spawn::<(), _>(info_span!("serve", %proto, %addr), async move {
+            let mut receiver = receiver.await?;
+            info!("Listening");
             loop {
                 match receiver.receive().await {
                     Ok((packet, tx, client_addr)) => {
@@ -487,12 +503,9 @@ impl Minion {
     /// # Errors
     /// - Duplicate ports
     /// - Invalid TLS keys or certificates
-    pub async fn create_and_serve(
-        config: &MinionConfig,
-        log: &mut Log,
-    ) -> Result<Vec<JoinHandle<()>>> {
+    pub fn create_and_serve(config: &MinionConfig, log: &mut Log) -> Result<Vec<JoinHandle<()>>> {
         log.set_global(&config.log)?;
-        Minion::new(&config.id).serve(&config.serve).await
+        Minion::new(&config.id).serve(&config.serve)
     }
 
     /// Serves specified ports and protocols
@@ -500,27 +513,27 @@ impl Minion {
     /// # Errors
     /// - Duplicate ports
     /// - Invalid TLS keys or certificates
-    pub async fn serve(self: &Arc<Minion>, config: &ServeConfig) -> Result<Vec<JoinHandle<()>>> {
+    pub fn serve(self: &Arc<Minion>, config: &ServeConfig) -> Result<Vec<JoinHandle<()>>> {
         let mut handles = vec![];
         for udp in config.udp.iter().flatten() {
             for addr in &udp.bind {
-                handles.push(self.serve_udp(addr, &udp.services).await?);
+                handles.push(self.serve_udp(addr, &udp.services)?);
             }
         }
         for tcp in config.tcp.iter().flatten() {
             for addr in &tcp.bind {
-                handles.push(self.serve_tcp(addr, &tcp.services).await?);
+                handles.push(self.serve_tcp(addr, &tcp.services)?);
             }
         }
         for tls in config.tls.iter().flatten() {
             for addr in &tls.bind.bind {
-                handles.push(self.serve_tls(addr, &tls.tls, &tls.bind.services).await?);
+                handles.push(self.serve_tls(addr, &tls.tls, &tls.bind.services)?);
             }
         }
         for legacy in config.legacy.iter().flatten() {
             let services = &legacy.bind.services;
             for addr in &legacy.bind.bind {
-                handles.push(self.serve_legacy(addr, &legacy.tls, services).await?);
+                handles.push(self.serve_legacy(addr, &legacy.tls, services)?);
             }
         }
         Ok(handles)
