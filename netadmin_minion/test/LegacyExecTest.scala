@@ -14,7 +14,12 @@ object LegacyExecTest {
   def main(args: Array[String]) {
     println(new File(".").getAbsolutePath)
     if (args.length < 3) {
-        println("Usage: scala LegacyExecTest [jks] [host] [port] [command]")
+        println("Usage: scala LegacyExecTest JKS HOST PORT COMMAND")
+        println("Where")
+        println("    JKS        - Path to .jks key store")
+        println("    HOST       - NetAdmin Minion host")
+        println("    PORT       - NetAdmin Minion legacy exec port")
+        println("    COMMAND    - Command to execute (as single argument)")
         System.exit(1)
     }
 
