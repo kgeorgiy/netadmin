@@ -4,7 +4,13 @@ use core::{
     mem,
     pin::Pin,
 };
-use std::{env, net::SocketAddr, path::Path, str, sync::Arc};
+use std::{
+    env, fs,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    str,
+    sync::Arc,
+};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -505,7 +511,17 @@ impl Minion {
     /// - Invalid TLS keys or certificates
     pub fn create_and_serve(config: &MinionConfig, log: &mut Log) -> Result<Vec<JoinHandle<()>>> {
         log.set_global(&config.log)?;
+        Self::write_pid(&config)?;
         Minion::new(&config.id).serve(&config.serve)
+    }
+
+    fn write_pid(config: &&MinionConfig) -> Result<()> {
+        if let Some(parent) = config.pid.parent() {
+            fs::create_dir_all(parent).context("Cannot create .pid file parent directory")?;
+        }
+        let pid = format!("{}\n", std::process::id());
+        fs::write(&config.pid, pid).context("Cannot write .pid file")?;
+        Ok(())
     }
 
     /// Serves specified ports and protocols
@@ -587,6 +603,7 @@ impl ServeConfig {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MinionConfig {
     id: String,
+    pid: PathBuf,
     log: LogConfig,
     serve: ServeConfig,
 }
@@ -594,5 +611,6 @@ pub struct MinionConfig {
 impl MinionConfig {
     pub fn resolve_paths(&mut self, base: &Path) {
         self.serve.resolve_paths(base);
+        self.pid = base.join(&self.pid);
     }
 }
