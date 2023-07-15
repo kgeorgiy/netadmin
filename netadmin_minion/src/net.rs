@@ -261,7 +261,7 @@ impl UdpReceiver {
     ///
     /// # Errors
     /// - Cannot bind to `socket_address`
-    pub async fn new(socket_address: &SocketAddr) -> Result<Self> {
+    pub async fn new(socket_address: SocketAddr) -> Result<Self> {
         Ok(Self {
             socket: Arc::new(UdpSocket::bind(socket_address).await?),
         })
@@ -297,7 +297,7 @@ impl TcpReceiver {
     ///
     /// # Errors
     /// - Cannot bind to `socket_address`
-    pub async fn new(socket_address: &SocketAddr) -> Result<Self> {
+    pub async fn new(socket_address: SocketAddr) -> Result<Self> {
         Ok(Self {
             listener: Arc::new(TcpListener::bind(socket_address).await?),
         })
@@ -324,7 +324,7 @@ impl Receiver<Arc<Mutex<TcpStream>>> for TcpReceiver {
 // TlsAuth, TlsServiceConfig, TlsClientConfig, TlsReceiver
 
 /// Authentication pair: key and certificate chain
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct TlsAuth {
     #[serde(alias = "private-key")]
@@ -355,7 +355,7 @@ impl TlsAuth {
 }
 
 /// TLS server configuration
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct TlsServerConfig {
     #[serde(flatten)]
@@ -479,7 +479,7 @@ impl TlsListener {
     /// Error error if
     /// - `config` is invalid
     /// - cannot bind to specified `socket_address`
-    pub async fn new(socket_address: &SocketAddr, config: &TlsServerConfig) -> Result<Self> {
+    pub async fn new(socket_address: SocketAddr, config: TlsServerConfig) -> Result<Self> {
         Ok(Self {
             acceptor: config.acceptor()?,
             listener: TcpListener::bind(&socket_address).await?,
@@ -518,7 +518,7 @@ impl TlsReceiver {
     /// Error error if
     /// - `config` is invalid
     /// - cannot bind to specified `socket_address`
-    pub async fn new(socket_address: &SocketAddr, config: &TlsServerConfig) -> Result<Self> {
+    pub async fn new(socket_address: SocketAddr, config: TlsServerConfig) -> Result<Self> {
         Ok(Self {
             listener: TlsListener::new(socket_address, config).await?,
         })

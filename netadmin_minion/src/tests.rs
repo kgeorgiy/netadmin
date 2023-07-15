@@ -96,7 +96,7 @@ async fn test_udp(host: &str, local: &str) -> Result<()> {
     let local = local.to_owned();
     let server_address = new_socket_addr(host)?;
     parallel_requests(
-        move |minion| async move { minion.serve_udp(&server_address, &[Service::Info]).await },
+        move |minion| minion.serve_udp(&server_address, &[Service::Info]),
         move |id, request| test_packet_udp(id, server_address, local.clone(), request),
     )
     .await
@@ -133,7 +133,7 @@ async fn test_tcp_ipv6() -> Result<()> {
 async fn test_tcp(host: &str) -> Result<()> {
     let server_address = new_socket_addr(host)?;
     parallel_requests(
-        move |minion| async move { minion.serve_tcp(&server_address, &[Service::Info]).await },
+        |minion| minion.serve_tcp(&server_address, &[Service::Info]),
         move |id, packet| test_packet_tcp(id, server_address, packet),
     )
     .await
@@ -144,15 +144,14 @@ async fn test_packet_tcp(id: String, server_address: SocketAddr, packet: Packet)
     communicate("TCP", id, server_address, packet, &mut stream).await
 }
 
-async fn parallel_requests<S, SR, C, CR>(start: S, communicate: C) -> Result<()>
+async fn parallel_requests<S, C, CR>(start: S, communicate: C) -> Result<()>
 where
-    S: Fn(Arc<Minion>) -> SR,
-    SR: Future<Output = Result<JoinHandle<()>>> + Send + 'static,
+    S: Fn(Arc<Minion>) -> Result<JoinHandle<()>>,
     C: Fn(String, Packet) -> CR + Clone + 'static,
     CR: Future<Output = Result<Packet>>,
 {
     let minion_id = "test_minion";
-    start(Minion::new(minion_id)).await?;
+    start(Minion::new(minion_id))?;
     parallel(5, |i| {
         let communicate = communicate.clone();
         let minion_id = minion_id.to_owned();
@@ -231,14 +230,12 @@ async fn test_tls(host: &str, minion_auth: Option<()>, client_auth: bool) -> Res
 
     let server_address = new_socket_addr(host)?;
     parallel_requests(
-        move |minion| async move {
-            minion
-                .serve_tls(
-                    &server_address,
-                    &tls_minion_config(minion_auth),
-                    &[Service::Info],
-                )
-                .await
+        |minion| {
+            minion.serve_tls(
+                &server_address,
+                &tls_minion_config(minion_auth),
+                &[Service::Info],
+            )
         },
         move |id, packet| {
             let config = Arc::clone(&config);
@@ -479,7 +476,7 @@ fn exec_request(cmd: &str, bash: &str) -> ExecRequest {
 async fn test_exec_echo_net() -> Result<()> {
     let minion = Minion::new("test");
     let minion_addr = new_socket_addr("127.0.0.2")?;
-    minion.serve_tcp(&minion_addr, &[Service::Exec]).await?;
+    minion.serve_tcp(&minion_addr, &[Service::Exec])?;
     let stream = &mut TcpStream::connect(minion_addr).await?;
 
     let request = exec_request("echo 123", "echo 123");
@@ -502,9 +499,7 @@ async fn test_exec_echo_net() -> Result<()> {
 async fn test_exec_echo_legacy() -> Result<()> {
     let minion = Minion::new("test");
     let minion_addr = new_socket_addr("127.0.0.2")?;
-    minion
-        .serve_legacy(&minion_addr, &tls_minion_config(None), &[Service::Exec])
-        .await?;
+    minion.serve_legacy(&minion_addr, &tls_minion_config(None), &[Service::Exec])?;
     let stream = &mut tls_connect(minion_addr, tls_client_config(true)?).await?;
 
     let command = b"echo 123";
@@ -577,14 +572,12 @@ async fn test_serve(
     udp_addrs: &[SocketAddr],
 ) -> Result<()> {
     let minion = Minion::new("test_serve_info");
-    let _: Vec<JoinHandle<()>> = minion
-        .serve(&ServeConfig {
-            tcp: tcp_udp_config(services, tcp_addrs),
-            udp: tcp_udp_config(services, udp_addrs),
-            tls: None,
-            legacy: None,
-        })
-        .await?;
+    let _: Vec<JoinHandle<()>> = minion.serve(&ServeConfig {
+        tcp: tcp_udp_config(services, tcp_addrs),
+        udp: tcp_udp_config(services, udp_addrs),
+        tls: None,
+        legacy: None,
+    })?;
     for addr in tcp_addrs {
         test_info_tcp(&minion.id, *addr).await?;
     }

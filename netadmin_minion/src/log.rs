@@ -9,8 +9,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tracing::{
-    info, level_filters::LevelFilter, subscriber, subscriber::DefaultGuard, warn, Instrument,
-    Level, Span,
+    info, level_filters::LevelFilter, subscriber, subscriber::DefaultGuard, warn, Instrument, Span,
 };
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_appender::rolling::RollingFileAppender;
@@ -99,7 +98,7 @@ impl Log {
     pub fn local() -> Log {
         Log(Some(LogState::Local(subscriber::set_default(
             tracing_subscriber::fmt()
-                .with_max_level(Level::INFO)
+                .with_max_level(LevelFilter::INFO)
                 .with_target(false)
                 .with_ansi(std::io::stdout().is_terminal())
                 .finish(),

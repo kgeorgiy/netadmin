@@ -45,7 +45,7 @@ async fn run(config_path: &Path, log: &mut Log) -> Result<()> {
     let mut config: MinionConfig = Log::load_config(config_path)?;
     config.resolve_paths(config_path.parent().expect("Has parent path"));
 
-    for handle in Minion::create_and_serve(&config, log).await? {
+    for handle in Minion::create_and_serve(&config, log)? {
         handle.await?;
     }
     Ok(())
