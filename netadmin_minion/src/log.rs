@@ -1,6 +1,7 @@
 use core::{fmt::Debug, future::Future, str};
 use std::env;
 use std::fs::File;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Error, Result};
@@ -100,6 +101,7 @@ impl Log {
             tracing_subscriber::fmt()
                 .with_max_level(Level::INFO)
                 .with_target(false)
+                .with_ansi(std::io::stdout().is_terminal())
                 .finish(),
         ))))
     }
