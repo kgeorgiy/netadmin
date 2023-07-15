@@ -36,9 +36,9 @@ NetAdmin remote info and command execution service.
     ```
     ps aux | grep netadmin-minion
     ```
-* Continue to [setup NetAdmin Scala Server](#keys)
+* Continue to [setup NetAdmin Scala Server](#nass)
 
-## <a name="scala">NetAdmin Scala Server integration</a>
+## <a name="nass">NetAdmin Scala Server integration</a>
 
 * Test generated keys before transferring them to NASS.
   Here `HOST` is a NetAdmin Minion host.
