@@ -36,5 +36,15 @@ NetAdmin remote info and command execution service.
     ```
     ps aux | grep netadmin-minion
     ```
-* Continue to [setup NetAdmin](#keys)
-    
+* Continue to [setup NetAdmin Scala Server](#keys)
+
+## <a name="scala">[NetAdmin Scala Server integration]</a>
+
+* Test generated keys before transferring them to NASS.
+    * Run `test/run-MinionInfoTest.sh HOST` to test info service
+    * Run `test/run-LegacyExecTest.sh HOST` to test legacy exec service
+  Where `HOST` is a NetAdmin Minion host.
+  To run test scripts on Windows use `sh` bundled to Git.
+* Copy `__keys/netadmin-server.jks` to `$NetAdmin/keys/`.
+* Edit `NetAdmin/linux-*.xml as` necessary.
+* Try to execute "Echo" task via NetAdmin
