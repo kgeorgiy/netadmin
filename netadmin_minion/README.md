@@ -8,33 +8,33 @@ NetAdmin remote info and command execution service.
 
 * [Install Rust](https://www.rust-lang.org/tools/install)
     ```
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
     ```
 * Install build tools
     ```
-        sudo apt install build-essential
+    sudo apt install build-essential
     ```
 * Build minion
     ```
-        cargo build --release
+    cargo build --release
     ```
 * Generate TLS keys
     ```
-        cargo run --release --bin netadmin-certgen
+    cargo run --release --bin netadmin-certgen
     ```
 * Install ipexec as a service
     ```
-        sudo ./scripts/deb-install.sh
+    sudo ./scripts/deb-install.sh
     ```
 
 * Start ipexec service
     ```
-        sudo service netadmin-minion start
+    sudo service netadmin-minion start
     ```
 
 * Check whether ipexec is running
     ```
-        ps aux | grep netadmin-minion
+    ps aux | grep netadmin-minion
     ```
 * Continue to [setup NetAdmin](#keys)
     
