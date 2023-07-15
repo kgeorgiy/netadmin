@@ -1,4 +1,5 @@
 use core::{fmt::Debug, future::Future, str};
+use std::any::Any;
 use std::env;
 use std::fs::File;
 use std::io::IsTerminal;
@@ -9,7 +10,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tracing::{
-    info, level_filters::LevelFilter, subscriber, subscriber::DefaultGuard, warn, Instrument, Span,
+    info, level_filters::LevelFilter, subscriber, warn, Instrument, Span,
 };
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_appender::rolling::RollingFileAppender;
@@ -59,6 +60,10 @@ pub struct LogConfig {
 }
 
 impl LogConfig {
+    pub fn new(file: &Path, level: LevelFilterConfig) -> LogConfig {
+        LogConfig { file: file.to_owned(), level }
+    }
+
     /// Creates a new subscriber
     ///
     /// # Errors
@@ -86,8 +91,8 @@ impl LogConfig {
 }
 
 enum LogState {
-    Local(DefaultGuard),
-    Global(WorkerGuard),
+    Local(Box<dyn Any>),
+    Global(Box<dyn Any>),
 }
 
 #[must_use]
@@ -96,13 +101,13 @@ pub struct Log(Option<LogState>);
 impl Log {
     /// Creates a new thread-local log
     pub fn local() -> Log {
-        Log(Some(LogState::Local(subscriber::set_default(
+        Log(Some(LogState::Local(Box::new(subscriber::set_default(
             tracing_subscriber::fmt()
                 .with_max_level(LevelFilter::INFO)
                 .with_target(false)
                 .with_ansi(std::io::stdout().is_terminal())
                 .finish(),
-        ))))
+        )))))
     }
 
     /// Sets global log configuration
@@ -116,7 +121,25 @@ impl Log {
                 let (global_guard, subscriber) = config.subscriber()?;
                 drop(local_guard);
                 subscriber::set_global_default(subscriber)?;
-                LogState::Global(global_guard)
+                LogState::Global(Box::new(global_guard))
+            }
+            state @ LogState::Global(_) => state,
+        });
+        Ok(())
+    }
+
+    /// Sets local log configuration
+    ///
+    /// # Errors
+    /// - Same as in [`LogConfig::subscriber`]
+    #[allow(clippy::unwrap_in_result)]
+    pub fn set_local(&mut self, config: &LogConfig) -> Result<()> {
+        self.0 = Some(match self.0.take().expect("impossible") {
+            LogState::Local(old_guard) => {
+                let (worker_guard, subscriber) = config.subscriber()?;
+                drop(old_guard);
+                let default_guard = subscriber::set_default(subscriber);
+                LogState::Local(Box::new((worker_guard, default_guard)))
             }
             state @ LogState::Global(_) => state,
         });

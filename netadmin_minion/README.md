@@ -22,19 +22,40 @@ NetAdmin remote info and command execution service.
     ```
     cargo run --release --bin netadmin-certgen
     ```
-* Install ipexec as a service
+* Install minion as a service
     ```
     sudo ./scripts/deb-install.sh
     ```
-
-* Start ipexec service
+* Start minion service
     ```
     sudo service netadmin-minion start
     ```
-
-* Check whether ipexec is running
+* Check whether minion is running
     ```
     ps aux | grep netadmin-minion
+    ```
+* Continue to [setup NetAdmin Scala Server](#nass)
+
+
+### Windows
+
+* [Install Rust](https://www.rust-lang.org/tools/install) (64-bit)
+* [Install build tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+* Build minion
+    ```
+    cargo build --release
+    ```
+* Generate TLS keys
+    ```
+    cargo run --release --bin netadmin-certgen
+    ```
+* Install minion as a service
+    ```
+    scripts\win-install.cmd
+    ```
+* Check whether minion is running
+    ```
+    sc query _netadmin-minion
     ```
 * Continue to [setup NetAdmin Scala Server](#nass)
 

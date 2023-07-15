@@ -33,6 +33,7 @@ use crate::{
 
 pub mod log;
 pub mod net;
+pub mod minion_main;
 mod tests;
 
 //
@@ -511,11 +512,11 @@ impl Minion {
     /// - Invalid TLS keys or certificates
     pub fn create_and_serve(config: &MinionConfig, log: &mut Log) -> Result<Vec<JoinHandle<()>>> {
         log.set_global(&config.log)?;
-        Self::write_pid(&config)?;
+        Self::write_pid(config)?;
         Minion::new(&config.id).serve(&config.serve)
     }
 
-    fn write_pid(config: &&MinionConfig) -> Result<()> {
+    fn write_pid(config: &MinionConfig) -> Result<()> {
         if let Some(parent) = config.pid.parent() {
             fs::create_dir_all(parent).context("Cannot create .pid file parent directory")?;
         }
